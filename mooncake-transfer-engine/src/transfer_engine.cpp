@@ -175,7 +175,8 @@ Transport *TransferEngine::installTransport(const std::string &proto,
     // added to ensure thread safety.
     for (auto &entry : local_memory_regions_) {
         int ret = transport->registerLocalMemory(
-            entry.addr, entry.length, entry.location, entry.remote_accessible);
+            entry.addr, entry.length, entry.location, entry.remote_accessible,
+            entry.remote_atomic);
         if (ret < 0) return nullptr;
     }
     return transport;
@@ -225,6 +226,7 @@ bool TransferEngine::checkOverlap(void *addr, uint64_t length) {
 int TransferEngine::registerLocalMemory(void *addr, size_t length,
                                         const std::string &location,
                                         bool remote_accessible,
+                                        bool remote_atomic,
                                         bool update_metadata) {
     if (checkOverlap(addr, length)) {
         LOG(ERROR)
@@ -233,13 +235,14 @@ int TransferEngine::registerLocalMemory(void *addr, size_t length,
     }
     for (auto transport : multi_transports_->listTransports()) {
         int ret = transport->registerLocalMemory(
-            addr, length, location, remote_accessible, update_metadata);
+            addr, length, location, remote_accessible, remote_atomic,
+            update_metadata);
         if (ret < 0) return ret;
     }
 
     std::unique_lock<std::shared_mutex> lock(mutex_);
     local_memory_regions_.push_back(
-        {addr, length, location, remote_accessible});
+        {addr, length, location, remote_accessible, remote_atomic});
     return 0;
 }
 

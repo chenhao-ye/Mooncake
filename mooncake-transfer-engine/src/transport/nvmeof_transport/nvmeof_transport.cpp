@@ -225,8 +225,10 @@ int NVMeoFTransport::install(std::string &local_server_name,
 int NVMeoFTransport::registerLocalMemory(void *addr, size_t length,
                                          const std::string &location,
                                          bool remote_accessible,
+                                         bool remote_atomic,
                                          bool update_metadata) {
     (void)remote_accessible;
+    (void)remote_atomic;
     (void)update_metadata;
     CUFILE_CHECK(cuFileBufRegister(addr, length, 0));
     return 0;

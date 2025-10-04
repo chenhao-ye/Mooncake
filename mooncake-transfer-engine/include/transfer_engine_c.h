@@ -117,7 +117,8 @@ int removeLocalSegment(transfer_engine_t engine, const char *segment_name);
 void destroyTransferEngine(transfer_engine_t engine);
 
 int registerLocalMemory(transfer_engine_t engine, void *addr, size_t length,
-                        const char *location, int remote_accessible);
+                        const char *location, int remote_accessible,
+                        int remote_atomic);
 
 int unregisterLocalMemory(transfer_engine_t engine, void *addr);
 

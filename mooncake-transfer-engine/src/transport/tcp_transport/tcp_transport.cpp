@@ -258,7 +258,9 @@ int TcpTransport::allocateLocalSegmentID() {
 int TcpTransport::registerLocalMemory(void *addr, size_t length,
                                       const std::string &location,
                                       bool remote_accessible,
+                                      bool remote_atomic,
                                       bool update_metadata) {
+    (void)remote_atomic;
     (void)remote_accessible;
     BufferDesc buffer_desc;
     buffer_desc.name = local_server_name_;

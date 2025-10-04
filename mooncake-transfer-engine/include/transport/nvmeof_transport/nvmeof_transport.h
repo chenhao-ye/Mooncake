@@ -82,7 +82,7 @@ class NVMeoFTransport : public Transport {
 
     int registerLocalMemory(void *addr, size_t length,
                             const std::string &location, bool remote_accessible,
-                            bool update_metadata) override;
+                            bool remote_atomic, bool update_metadata) override;
 
     int unregisterLocalMemory(void *addr,
                               bool update_metadata = false) override;

@@ -51,7 +51,7 @@ class Transport {
     using HandShakeDesc = TransferMetadata::HandShakeDesc;
 
     struct TransferRequest {
-        enum OpCode { READ, WRITE };
+        enum OpCode { READ, WRITE, ATOMIC_READ };
 
         OpCode opcode;
         void *source;
@@ -255,6 +255,7 @@ class Transport {
     virtual int registerLocalMemory(void *addr, size_t length,
                                     const std::string &location,
                                     bool remote_accessible,
+                                    bool remote_atomic,
                                     bool update_metadata = true) = 0;
 
     virtual int unregisterLocalMemory(void *addr,

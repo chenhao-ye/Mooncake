@@ -102,6 +102,7 @@ class TransferEngine {
     int registerLocalMemory(void *addr, size_t length,
                             const std::string &location = kWildcardLocation,
                             bool remote_accessible = true,
+                            bool remote_atomic = false,
                             bool update_metadata = true);
 
     int unregisterLocalMemory(void *addr, bool update_metadata = true);
@@ -164,6 +165,7 @@ class TransferEngine {
         uint64_t length;
         std::string location;
         bool remote_accessible;
+        bool remote_atomic;
     };
 
     std::shared_ptr<TransferMetadata> metadata_;

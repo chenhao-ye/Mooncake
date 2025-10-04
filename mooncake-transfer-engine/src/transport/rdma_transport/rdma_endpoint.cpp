@@ -287,16 +287,23 @@ int RdmaEndPoint::submitPostSend(
 
         auto &wr = wr_list[i];
         wr.wr_id = (uint64_t)slice;
-        wr.opcode = slice->opcode == Transport::TransferRequest::READ
-                        ? IBV_WR_RDMA_READ
-                        : IBV_WR_RDMA_WRITE;
+        if (slice->opcode == Transport::TransferRequest::ATOMIC_READ) {
+            wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
+            wr.wr.atomic.remote_addr = slice->rdma.dest_addr;
+            wr.wr.atomic.rkey = slice->rdma.dest_rkey;
+            wr.wr.atomic.compare_add = 0;  // fetch-add zero
+        } else {
+            wr.opcode = slice->opcode == Transport::TransferRequest::READ
+                            ? IBV_WR_RDMA_READ
+                            : IBV_WR_RDMA_WRITE;
+            wr.wr.rdma.remote_addr = slice->rdma.dest_addr;
+            wr.wr.rdma.rkey = slice->rdma.dest_rkey;
+        }
         wr.num_sge = 1;
         wr.sg_list = &sge;
         wr.send_flags = IBV_SEND_SIGNALED;
         wr.next = (i + 1 == wr_count) ? nullptr : &wr_list[i + 1];
         wr.imm_data = 0;
-        wr.wr.rdma.remote_addr = slice->rdma.dest_addr;
-        wr.wr.rdma.rkey = slice->rdma.dest_rkey;
         slice->ts = getCurrentTimeInNano();
         slice->status = Transport::Slice::POSTED;
         slice->rdma.qp_depth = &wr_depth_list_[qp_index];

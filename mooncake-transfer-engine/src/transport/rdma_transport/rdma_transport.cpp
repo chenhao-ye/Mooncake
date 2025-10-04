@@ -86,12 +86,15 @@ int RdmaTransport::install(std::string &local_server_name,
 int RdmaTransport::registerLocalMemory(void *addr, size_t length,
                                        const std::string &name,
                                        bool remote_accessible,
+                                       bool remote_atomic,
                                        bool update_metadata) {
     (void)remote_accessible;
     BufferDesc buffer_desc;
-    const static int access_rights = IBV_ACCESS_LOCAL_WRITE |
-                                     IBV_ACCESS_REMOTE_WRITE |
-                                     IBV_ACCESS_REMOTE_READ;
+    int access_rights = IBV_ACCESS_LOCAL_WRITE |
+                        IBV_ACCESS_REMOTE_WRITE |
+                        IBV_ACCESS_REMOTE_READ;
+    if (remote_atomic) access_rights |= IBV_ACCESS_REMOTE_ATOMIC;
+    
     for (auto &context : context_list_) {
         int ret = context->registerMemoryRegion(addr, length, access_rights);
         if (ret) return ret;

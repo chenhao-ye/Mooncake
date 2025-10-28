@@ -23,3 +23,6 @@ endif()
 if (WITH_RUST_EXAMPLE)
   add_subdirectory(rust)
 endif()
+
+# Flex Transfer Engine
+add_subdirectory(flex_transfer)

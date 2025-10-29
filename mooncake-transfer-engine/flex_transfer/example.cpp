@@ -18,8 +18,7 @@
 #include <iostream>
 #include <vector>
 
-#include "copy_transfer_engine.h"
-#include "direct_transfer_engine.h"
+#include "flex_transfer_engine.h"
 
 using namespace mooncake;
 
@@ -40,19 +39,20 @@ int main(int argc, char **argv) {
     std::string local_server_name = argv[3];
 
     if (mode == "copy") {
-        // Run as CopyTransferEngine (target/server)
-        std::cerr << "Starting CopyTransferEngine..." << std::endl;
+        // Run with copy-based transfer enabled (acts as server)
+        std::cerr << "Starting FlexTransferEngine with copy mode enabled..."
+                  << std::endl;
 
-        CopyTransferEngine copy_engine;
-        int ret = copy_engine.init(metadata_server, local_server_name, "",
-                                   12345, 12346, 1);
+        FlexTransferEngine engine(true);  // enable_copy = true
+        int ret = engine.init(metadata_server, local_server_name, "", 12345,
+                             12346, 1);
         if (ret < 0) {
-            std::cerr << "Failed to initialize CopyTransferEngine" << std::endl;
+            std::cerr << "Failed to initialize FlexTransferEngine" << std::endl;
             return 1;
         }
 
-        std::cerr << "CopyTransferEngine initialized on port "
-                  << copy_engine.getTcpPort() << std::endl;
+        std::cerr << "FlexTransferEngine initialized on TCP port "
+                  << engine.getTcpPort() << std::endl;
 
         // Allocate and register some test memory
         const size_t buffer_size = 1024 * 1024;  // 1 MB
@@ -66,8 +66,7 @@ int main(int argc, char **argv) {
         memset(test_buffer, 0xAB, buffer_size);
 
         // Register the buffer
-        ret = copy_engine.registerLocalMemory(test_buffer, buffer_size, "cpu",
-                                              1);
+        ret = engine.registerLocalMemory(test_buffer, buffer_size, "cpu", 1);
         if (ret < 0) {
             std::cerr << "Failed to register test buffer" << std::endl;
             free(test_buffer);
@@ -76,7 +75,7 @@ int main(int argc, char **argv) {
 
         std::cerr << "Registered test buffer at " << test_buffer << " size "
                   << buffer_size << std::endl;
-        std::cerr << "CopyTransferEngine ready. Press Ctrl+C to exit."
+        std::cerr << "FlexTransferEngine ready. Press Ctrl+C to exit."
                   << std::endl;
 
         // Keep running
@@ -87,21 +86,21 @@ int main(int argc, char **argv) {
         free(test_buffer);
 
     } else if (mode == "direct") {
-        // Run as DirectTransferEngine (initiator/client)
-        std::cerr << "Starting DirectTransferEngine..." << std::endl;
+        // Run as direct transfer (acts as client)
+        std::cerr << "Starting FlexTransferEngine in direct mode..."
+                  << std::endl;
 
-        DirectTransferEngine direct_engine;
-        int ret =
-            direct_engine.init(metadata_server, local_server_name, "", 12345, 1);
+        FlexTransferEngine engine(false);  // enable_copy = false
+        int ret = engine.init(metadata_server, local_server_name, "", 12345,
+                             12346, 1);
         if (ret < 0) {
-            std::cerr << "Failed to initialize DirectTransferEngine"
-                      << std::endl;
+            std::cerr << "Failed to initialize FlexTransferEngine" << std::endl;
             return 1;
         }
 
-        std::cerr << "DirectTransferEngine initialized" << std::endl;
+        std::cerr << "FlexTransferEngine initialized" << std::endl;
 
-        // Wait a bit for CopyTransferEngine to be ready
+        // Wait a bit for copy-enabled engine to be ready
         sleep(2);
 
         // Allocate local buffer to receive data
@@ -115,8 +114,7 @@ int main(int argc, char **argv) {
         memset(local_buffer, 0, buffer_size);
 
         // Register local buffer
-        ret = direct_engine.registerLocalMemory(local_buffer, buffer_size,
-                                                "cpu", 1);
+        ret = engine.registerLocalMemory(local_buffer, buffer_size, "cpu", 1);
         if (ret < 0) {
             std::cerr << "Failed to register local buffer" << std::endl;
             free(local_buffer);
@@ -128,12 +126,13 @@ int main(int argc, char **argv) {
 
         // TODO: In a real implementation, we would:
         // 1. Open the remote segment
-        // 2. Create transfer requests to read from CopyTransferEngine
+        // 2. Create transfer requests to read from remote engine
         // 3. Submit the transfer with copy_server_name and copy_server_port
+        //    to use copy-based transfer, or leave empty for direct RDMA
         // 4. Wait for completion
         // 5. Verify the data
 
-        std::cerr << "DirectTransferEngine setup complete" << std::endl;
+        std::cerr << "FlexTransferEngine setup complete" << std::endl;
         std::cerr
             << "Note: Full transfer test requires additional implementation"
             << std::endl;

@@ -1,42 +1,80 @@
 # Flex Transfer Engine
 
-When using RDMA transfer, the user must first register the memory, which is costly. It is acceptable as one-time cost, but in some cases, register/unregister can happen very frequently, causing significant overhead. To address these problems, we augment the transfer engine with different backends: Direct Transfer Engine and Copy Transfer Engine.
+When using RDMA transfer, the user must first register the memory, which is costly. It is acceptable as one-time cost, but in some cases, register/unregister can happen very frequently, causing significant overhead. To address this problem, we provide `FlexTransferEngine`, which unifies direct RDMA transfer and copy-based transfer in a single flexible API.
 
 ## Implementation Status
 
 This implementation includes:
-- `DirectTransferEngine`: Thin wrapper around TransferEngine that supports reading from CopyTransferEngine
-- `CopyTransferEngine`: Manages pre-registered RDMA buffers (one buffer pair per memory location) and handles copy-based transfers
-- TCP-based protocol for transfer coordination between Direct and Copy engines
+- `FlexTransferEngine`: Unified transfer engine supporting both direct RDMA and copy-based transfers
+- TCP-based protocol for transfer coordination between engines
+- Pre-registered RDMA buffer pools (one buffer pair per memory location) for copy-based transfers
 - Double buffering support for overlapping copy and RDMA operations
 - Support for both CPU and GPU memory (when compiled with CUDA support)
+- Single contiguous allocation for buffer pairs to reduce registration overhead
 
-## Direct Transfer Engine
+## FlexTransferEngine
 
-`DirectTransferEngine` is a thin wrapper on top of existing `class TransferEngine` (as in `mooncake-transfer-engine/include/transfer_engine.h`). It exposes `openSegment`, `closeSegment`, `registerLocalMemory`, `unregisterLocalMemory`, `registerLocalMemoryBatch`, `unregisterLocalMemoryBatch`, `syncSegmentCache`, `allocateBatchID`, `freeBatchID`, `submitTransfer`, and `getTransferStatus`. All data transfer between two DirectTransferEngine are the same as the raw TranserEngine. The only difference is how it interacts with CopyTransferEngine (see below).
+`FlexTransferEngine` is a flexible wrapper on top of the C API `transfer_engine_c.h`. It provides the same API as TransferEngine with additional support for copy-based transfers.
 
-## Copy Transfer Engine
+**Constructor:**
+```cpp
+FlexTransferEngine(bool enable_copy = false)
+```
+- `enable_copy = false`: Engine operates in direct RDMA mode only
+- `enable_copy = true`: Engine also starts a TCP listener for copy-based transfers
 
-`CopyTransferEngine` is another a wrapped on top existing transfer engine and expose these APIs similar to `class TransferEngine`: `openSegment`, `closeSegment`, `registerLocalMemory`, `unregisterLocalMemory`, `registerLocalMemoryBatch`, `unregisterLocalMemoryBatch`, `syncSegmentCache` (note it does not provide APIs to submit read/write requests).
+**API:**
+The engine exposes standard TransferEngine APIs: `openSegment`, `closeSegment`, `registerLocalMemory`, `unregisterLocalMemory`, `registerLocalMemoryBatch`, `unregisterLocalMemoryBatch`, `syncSegmentCache`, `allocateBatchID`, `freeBatchID`, `submitTransfer`, and `getTransferStatus`.
 
-Most of the CopyTransferEngine APIs are just a simple pass-through to the underlying TransferEngine except the register-related APIs.
+## Copy-Based Transfer Mode
 
-- `registerLocalMemoryBatch` will not directly register the memory to RDMA NICs. It keeps a record of the provided memory regions. Then checks for each device ("location") if it has a pair of memory buffers that is larger than the largest memory region among the batch. If not (or if the existing buffer pair is too small), it allocates/reallocates a buffer pair and registers it with RDMA NICs. Each location has exactly one buffer pair. Note the location starting with "cuda" is a GPU memory; otherwise, it is a CPU memory.
-- `unregisterLocalMemoryBatch` only remove these memory regions from its internal data structures. Do not actually unregister the buffers (left for future reuse).
-- `registerLocalMemory` and `unregisterLocalMemory` are similar.
+When `enable_copy = true`, the engine:
 
-CopyTransferEngine will have a background thread listening on TCP to initiate data transfer (see below).
+1. Starts a background TCP listener thread on the specified port
+2. Tracks registered memory regions internally
+3. Manages a buffer pool with one buffer pair per memory location
+4. Each buffer pair is allocated as a single contiguous buffer (size 2×largest_region) and split into two halves
+5. Buffer pairs are registered with RDMA only once and reused for all transfers
 
-## DirectTransferEngine Reads from CopyTransferEnginie
+**Memory Registration Behavior:**
+- `registerLocalMemory` keeps a record of the memory region and ensures a buffer pair exists for the location
+- If no buffer pair exists or the existing one is too small, allocates/reallocates the buffer pair
+- `unregisterLocalMemory` only removes the region from internal tracking; buffer pairs remain for reuse
+- Note: Locations starting with "cuda" indicate GPU memory; otherwise, CPU memory
 
-Currently, DirectTransferEngine only supports to read data from CopyTransferEngine; other supports may be addded later. When the user calls `submitTransfer` to DirectTransferEngine, they can provide the CopyTransferEngine's server name and TCP port. If provided, the transfer will use the copy-based approach via TCP (such transfer batch should only contain read requests; an error will be thrown if any non-read request is detected during execution). If the server name is empty, normal RDMA transfer will be used.
+## Transfer Modes
 
-DirectTransferEngine first sends the batch info to the CopyTransferEngine via TCP. The background listener thread will receive a "progress" address, a counter of how many requests, and a sequence of addr-size pairs as requests; it then starts to transfer the data:
-1. It first confirms the given addresses are registered; return an error if not.
-2. It then copies the data from the given address to a RDMA-registered buffer, and then issues RDMA write (through the underlying `TransferEngine::submitTransfer`). Note the address could be in CUDA memory.
-3. For performance, the copy and RDMA transfer should be overlapped by utilizing the buffer pairs: one buffer is do copying while the other is doing RDMA transfer. Once a transfer is done, that buffer can be reused for the next request.
+When calling `submitTransfer`, users can specify the transfer mode:
 
-During the transfer, once the request `i` is done, add a RDMA-write request (to the progress address with value `i`) to the next batch. If there is an error (e.g., a given address is not registered), write -1 to the progress address.
+```cpp
+int submitTransfer(batch_id_t batch_id,
+                   const std::vector<transfer_request_t> &entries,
+                   const std::string &copy_server_name = "",
+                   uint16_t copy_server_port = 12346);
+```
+
+- **Direct RDMA mode** (`copy_server_name` is empty): Uses standard RDMA transfer
+- **Copy-based mode** (`copy_server_name` provided): Uses TCP-coordinated copy transfer
+
+**Copy-Based Transfer Protocol:**
+
+Currently only supports read requests (reading from a remote engine with `enable_copy = true`).
+
+1. Initiator sends via TCP:
+   - Target segment name (the initiator's local segment name where data will be written)
+   - Progress address (for tracking completion)
+   - Number of requests
+   - For each request: source address, target offset, length
+
+2. Remote engine (with `enable_copy = true`):
+   - Opens the target segment (caches segment_id)
+   - For each request:
+     - Verifies source address is registered
+     - Copies data from source to pre-registered buffer
+     - Performs RDMA write from buffer to target segment
+   - Updates progress counter via RDMA write
+
+3. Double buffering ensures overlap between memory copy and RDMA transfer operations
 
 ## Building
 
@@ -58,11 +96,11 @@ The following components are built:
 ### API Example
 
 ```cpp
-#include "copy_transfer_engine.h"
-#include "direct_transfer_engine.h"
+#include "flex_transfer_engine.h"
 
 // On the target node (server with frequently changing memory regions)
-CopyTransferEngine copy_engine;
+// Enable copy-based transfer mode
+FlexTransferEngine copy_engine(true);  // enable_copy = true
 copy_engine.init(metadata_server, local_server_name, "", 12345, 12346, 1);
 
 // Register memory that changes frequently
@@ -70,26 +108,30 @@ void *data = malloc(size);
 copy_engine.registerLocalMemory(data, size, "cpu", 1);
 
 // On the initiator node (client that reads data)
-DirectTransferEngine direct_engine;
-direct_engine.init(metadata_server, local_server_name, "", 12345, 1);
+// Direct RDMA mode (no copy listener needed)
+FlexTransferEngine direct_engine(false);  // enable_copy = false
+direct_engine.init(metadata_server, local_server_name, "", 12345, 12346, 1);
 
 // Allocate local buffer
 void *local_buffer = malloc(size);
 direct_engine.registerLocalMemory(local_buffer, size, "cpu", 1);
 
-// Submit read requests from CopyTransferEngine
+// Submit read requests from remote engine
 batch_id_t batch_id = direct_engine.allocateBatchID(1);
 std::vector<transfer_request_t> requests;
 transfer_request_t req;
 req.opcode = OPCODE_READ;
-req.source = remote_addr;  // Address on CopyTransferEngine
+req.source = remote_addr;  // Address on remote engine
 req.target_id = LOCAL_SEGMENT;
 req.target_offset = (uint64_t)local_buffer;
 req.length = size;
 requests.push_back(req);
 
-// Submit with CopyTransferEngine server name and port
+// Option 1: Use copy-based transfer (copy_server_name provided)
 direct_engine.submitTransfer(batch_id, requests, "target_server", 12346);
+
+// Option 2: Use direct RDMA transfer (copy_server_name empty)
+// direct_engine.submitTransfer(batch_id, requests);
 ```
 
 ### Running the Example

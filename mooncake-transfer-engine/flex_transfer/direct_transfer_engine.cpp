@@ -24,25 +24,30 @@
 #include <iostream>
 
 #include "common.h"
-#include "error.h"
 
 namespace mooncake {
 
 int DirectTransferEngine::init(const std::string &metadata_conn_string,
                                const std::string &local_server_name,
                                const std::string &ip_or_host_name,
-                               uint64_t rpc_port) {
-    int ret = engine_->init(metadata_conn_string, local_server_name,
-                            ip_or_host_name, rpc_port);
-    if (ret < 0) {
-        return ret;
+                               uint64_t rpc_port, int auto_discover) {
+    local_server_name_ = local_server_name;
+
+    engine_ = createTransferEngine(
+        metadata_conn_string.c_str(), local_server_name.c_str(),
+        ip_or_host_name.empty() ? nullptr : ip_or_host_name.c_str(), rpc_port,
+        auto_discover);
+    if (engine_ == nullptr) {
+        std::cerr << "Failed to create TransferEngine" << std::endl;
+        return -1;
     }
 
     // Register progress address for CopyTransferEngine transfers
-    ret = engine_->registerLocalMemory(&progress_, sizeof(progress_),
-                                       kWildcardLocation, true, true);
+    int ret = registerLocalMemory(&progress_, sizeof(progress_), "", 1);
     if (ret < 0) {
         std::cerr << "Failed to register progress memory" << std::endl;
+        destroyTransferEngine(engine_);
+        engine_ = nullptr;
         return ret;
     }
     progress_registered_ = true;
@@ -52,46 +57,104 @@ int DirectTransferEngine::init(const std::string &metadata_conn_string,
 
 DirectTransferEngine::~DirectTransferEngine() {
     // Unregister progress address if it was registered
-    if (progress_registered_) {
-        engine_->unregisterLocalMemory(&progress_, true);
+    if (progress_registered_ && engine_ != nullptr) {
+        unregisterLocalMemory(&progress_);
+    }
+
+    // Destroy the engine
+    if (engine_ != nullptr) {
+        destroyTransferEngine(engine_);
+    }
+
+    // Close all TCP connections
+    for (const auto &[_, fd] : copy_engine_connections_) {
+        close(fd);
     }
 }
 
-Status DirectTransferEngine::submitTransfer(
-    BatchID batch_id, const std::vector<TransferRequest> &entries,
-    bool target_is_copy_engine) {
-    if (!target_is_copy_engine) {
+segment_id_t DirectTransferEngine::openSegment(
+    const std::string &segment_name) {
+    return ::openSegment(engine_, segment_name.c_str());
+}
+
+int DirectTransferEngine::closeSegment(segment_id_t segment_id) {
+    return ::closeSegment(engine_, segment_id);
+}
+
+int DirectTransferEngine::registerLocalMemory(void *addr, size_t length,
+                                               const std::string &location,
+                                               int remote_accessible) {
+    return ::registerLocalMemory(
+        engine_, addr, length,
+        location.empty() ? nullptr : location.c_str(), remote_accessible);
+}
+
+int DirectTransferEngine::unregisterLocalMemory(void *addr) {
+    return ::unregisterLocalMemory(engine_, addr);
+}
+
+int DirectTransferEngine::registerLocalMemoryBatch(
+    const std::vector<buffer_entry_t> &buffer_list,
+    const std::string &location) {
+    std::vector<buffer_entry_t> buf_list = buffer_list;
+    return ::registerLocalMemoryBatch(engine_, buf_list.data(),
+                                      buf_list.size(), location.c_str());
+}
+
+int DirectTransferEngine::unregisterLocalMemoryBatch(
+    const std::vector<void *> &addr_list) {
+    std::vector<void *> addrs = addr_list;
+    return ::unregisterLocalMemoryBatch(engine_, addrs.data(), addrs.size());
+}
+
+int DirectTransferEngine::syncSegmentCache() {
+    return ::syncSegmentCache(engine_);
+}
+
+batch_id_t DirectTransferEngine::allocateBatchID(size_t batch_size) {
+    return ::allocateBatchID(engine_, batch_size);
+}
+
+int DirectTransferEngine::freeBatchID(batch_id_t batch_id) {
+    return ::freeBatchID(engine_, batch_id);
+}
+
+int DirectTransferEngine::submitTransfer(
+    batch_id_t batch_id, const std::vector<transfer_request_t> &entries,
+    const std::string &copy_server_name, uint16_t copy_server_port) {
+    if (copy_server_name.empty()) {
         // Normal transfer through underlying TransferEngine
-        return engine_->submitTransfer(batch_id, entries);
+        std::vector<transfer_request_t> reqs = entries;
+        return ::submitTransfer(engine_, batch_id, reqs.data(), reqs.size());
     }
 
     // Transfer to CopyTransferEngine
-    return submitTransferToCopyEngine(batch_id, entries);
+    return submitTransferToCopyEngine(batch_id, entries, copy_server_name,
+                                      copy_server_port);
 }
 
-Status DirectTransferEngine::submitTransferToCopyEngine(
-    BatchID batch_id, const std::vector<TransferRequest> &entries) {
+int DirectTransferEngine::getTransferStatus(batch_id_t batch_id,
+                                             size_t task_id,
+                                             transfer_status_t &status) {
+    return ::getTransferStatus(engine_, batch_id, task_id, &status);
+}
+
+int DirectTransferEngine::submitTransferToCopyEngine(
+    batch_id_t batch_id, const std::vector<transfer_request_t> &entries,
+    const std::string &server_name, uint16_t port) {
     // Verify all entries are read requests
     for (const auto &entry : entries) {
-        if (entry.opcode != TransferRequest::READ) {
+        if (entry.opcode != OPCODE_READ) {
             std::cerr << "Only read requests are supported when target is "
                          "CopyTransferEngine"
                       << std::endl;
-            return Status::InvalidArgument(
-                "Only read requests supported for CopyTransferEngine");
+            return -1;
         }
     }
 
     if (entries.empty()) {
-        return Status::OK();
+        return 0;
     }
-
-    // Get the target segment from metadata
-    // For simplicity, we'll use the local server name as target
-    // In a real implementation, this should be obtained from the segment
-    // descriptor
-    std::string server_name =
-        "target_server";  // TODO: Get from segment metadata
 
     // Connect to the CopyTransferEngine (or reuse existing connection)
     int fd = -1;
@@ -101,13 +164,11 @@ Status DirectTransferEngine::submitTransferToCopyEngine(
         if (it != copy_engine_connections_.end()) {
             fd = it->second;
         } else {
-            // Default port for CopyTransferEngine TCP listener
-            fd = connectToCopyEngine(server_name, 12346);
+            fd = connectToCopyEngine(server_name, port);
             if (fd < 0) {
                 std::cerr << "Failed to connect to CopyTransferEngine at "
                           << server_name << std::endl;
-                return Status::Socket(
-                    "Failed to connect to CopyTransferEngine");
+                return -1;
             }
             copy_engine_connections_[server_name] = fd;
         }
@@ -116,12 +177,32 @@ Status DirectTransferEngine::submitTransferToCopyEngine(
     // Reset the pre-registered progress counter
     progress_.store(0);
 
-    // Send batch info to CopyTransferEngine:
-    // 1. Progress address (8 bytes)
-    // 2. Number of requests (8 bytes)
-    // 3. For each request: source_addr (8 bytes), target_addr (8 bytes), length
+    // Send protocol to CopyTransferEngine:
+    // 1. Segment name length (4 bytes)
+    // 2. Segment name (variable length)
+    // 3. Progress address (8 bytes)
+    // 4. Number of requests (8 bytes)
+    // 5. For each request: source_addr (8 bytes), target_addr (8 bytes), length
     // (8 bytes)
 
+    // Send segment name length
+    uint32_t segment_name_len = local_server_name_.size();
+    if (writeFully(fd, &segment_name_len, sizeof(segment_name_len)) !=
+        sizeof(segment_name_len)) {
+        std::cerr << "Failed to send segment name length to CopyTransferEngine"
+                  << std::endl;
+        return -1;
+    }
+
+    // Send segment name
+    if (writeFully(fd, local_server_name_.c_str(), segment_name_len) !=
+        segment_name_len) {
+        std::cerr << "Failed to send segment name to CopyTransferEngine"
+                  << std::endl;
+        return -1;
+    }
+
+    // Send batch info
     struct BatchInfo {
         uint64_t progress_addr;
         uint64_t num_requests;
@@ -134,7 +215,7 @@ Status DirectTransferEngine::submitTransferToCopyEngine(
     if (writeFully(fd, &batch_info, sizeof(batch_info)) != sizeof(batch_info)) {
         std::cerr << "Failed to send batch info to CopyTransferEngine"
                   << std::endl;
-        return Status::Socket("Failed to send batch info");
+        return -1;
     }
 
     // Send request details (source on CopyTransferEngine, target on
@@ -154,7 +235,7 @@ Status DirectTransferEngine::submitTransferToCopyEngine(
         if (writeFully(fd, &req_info, sizeof(req_info)) != sizeof(req_info)) {
             std::cerr << "Failed to send request info to CopyTransferEngine"
                       << std::endl;
-            return Status::Socket("Failed to send request info");
+            return -1;
         }
     }
 
@@ -167,11 +248,11 @@ Status DirectTransferEngine::submitTransferToCopyEngine(
               << " requests to CopyTransferEngine at " << server_name
               << std::endl;
 
-    return Status::OK();
+    return 0;
 }
 
 int DirectTransferEngine::connectToCopyEngine(const std::string &server_name,
-                                              uint16_t port) {
+                                               uint16_t port) {
     // Parse server name and port
     auto [hostname, parsed_port] = parseHostNameWithPort(server_name);
     // Use parsed port if it's different from the default

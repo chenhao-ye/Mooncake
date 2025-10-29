@@ -16,13 +16,12 @@
 #define DIRECT_TRANSFER_ENGINE_H_
 
 #include <atomic>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "transfer_engine.h"
+#include "transfer_engine_c.h"
 
 namespace mooncake {
 
@@ -36,16 +35,8 @@ namespace mooncake {
  */
 class DirectTransferEngine {
    public:
-    DirectTransferEngine(bool auto_discover = false)
-        : engine_(std::make_unique<TransferEngine>(auto_discover)),
-          progress_(0),
-          progress_registered_(false) {}
-
-    DirectTransferEngine(bool auto_discover,
-                         const std::vector<std::string> &filter)
-        : engine_(std::make_unique<TransferEngine>(auto_discover, filter)),
-          progress_(0),
-          progress_registered_(false) {}
+    DirectTransferEngine()
+        : engine_(nullptr), progress_(0), progress_registered_(false) {}
 
     ~DirectTransferEngine();
 
@@ -55,100 +46,79 @@ class DirectTransferEngine {
     int init(const std::string &metadata_conn_string,
              const std::string &local_server_name,
              const std::string &ip_or_host_name = "",
-             uint64_t rpc_port = 12345);
+             uint64_t rpc_port = 12345, int auto_discover = 1);
 
     /**
      * Open a segment by name.
      */
-    SegmentHandle openSegment(const std::string &segment_name) {
-        return engine_->openSegment(segment_name);
-    }
+    segment_id_t openSegment(const std::string &segment_name);
 
     /**
      * Close a segment.
      */
-    int closeSegment(SegmentHandle handle) {
-        return engine_->closeSegment(handle);
-    }
+    int closeSegment(segment_id_t segment_id);
 
     /**
      * Register local memory with the transfer engine.
      */
     int registerLocalMemory(void *addr, size_t length,
-                            const std::string &location = kWildcardLocation,
-                            bool remote_accessible = true,
-                            bool update_metadata = true) {
-        return engine_->registerLocalMemory(addr, length, location,
-                                            remote_accessible, update_metadata);
-    }
+                            const std::string &location, int remote_accessible);
 
     /**
      * Unregister local memory.
      */
-    int unregisterLocalMemory(void *addr, bool update_metadata = true) {
-        return engine_->unregisterLocalMemory(addr, update_metadata);
-    }
+    int unregisterLocalMemory(void *addr);
 
     /**
      * Register a batch of local memory buffers.
      */
-    int registerLocalMemoryBatch(const std::vector<BufferEntry> &buffer_list,
-                                 const std::string &location) {
-        return engine_->registerLocalMemoryBatch(buffer_list, location);
-    }
+    int registerLocalMemoryBatch(const std::vector<buffer_entry_t> &buffer_list,
+                                 const std::string &location);
 
     /**
      * Unregister a batch of local memory buffers.
      */
-    int unregisterLocalMemoryBatch(const std::vector<void *> &addr_list) {
-        return engine_->unregisterLocalMemoryBatch(addr_list);
-    }
+    int unregisterLocalMemoryBatch(const std::vector<void *> &addr_list);
 
     /**
      * Sync segment cache with metadata server.
      */
-    int syncSegmentCache(const std::string &segment_name = "") {
-        return engine_->syncSegmentCache(segment_name);
-    }
+    int syncSegmentCache();
 
     /**
      * Allocate a batch ID for transfer operations.
      */
-    BatchID allocateBatchID(size_t batch_size) {
-        return engine_->allocateBatchID(batch_size);
-    }
+    batch_id_t allocateBatchID(size_t batch_size);
 
     /**
      * Free a batch ID.
      */
-    Status freeBatchID(BatchID batch_id) {
-        return engine_->freeBatchID(batch_id);
-    }
+    int freeBatchID(batch_id_t batch_id);
 
     /**
      * Submit a transfer batch.
      *
      * @param batch_id The batch ID allocated by allocateBatchID.
      * @param entries The transfer requests.
-     * @param target_is_copy_engine If true, the target is a CopyTransferEngine
-     *        and this batch should only contain read requests.
+     * @param copy_server_name Optional server name for CopyTransferEngine. If
+     *        provided, transfer will use copy-based approach via TCP.
+     * @param copy_server_port TCP port for CopyTransferEngine (default 12346).
      */
-    Status submitTransfer(BatchID batch_id,
-                          const std::vector<TransferRequest> &entries,
-                          bool target_is_copy_engine = false);
+    int submitTransfer(batch_id_t batch_id,
+                       const std::vector<transfer_request_t> &entries,
+                       const std::string &copy_server_name = "",
+                       uint16_t copy_server_port = 12346);
 
     /**
      * Get the status of a transfer.
      */
-    Status getTransferStatus(BatchID batch_id, size_t task_id,
-                             TransferStatus &status) {
-        return engine_->getTransferStatus(batch_id, task_id, status);
-    }
+    int getTransferStatus(batch_id_t batch_id, size_t task_id,
+                          transfer_status_t &status);
 
     /**
-     * Get the underlying TransferEngine.
+     * Get the underlying TransferEngine handle.
      */
-    TransferEngine *getEngine() { return engine_.get(); }
+    transfer_engine_t getEngine() { return engine_; }
 
    private:
     /**
@@ -159,10 +129,14 @@ class DirectTransferEngine {
     /**
      * Send batch info to CopyTransferEngine and initiate transfer.
      */
-    Status submitTransferToCopyEngine(
-        BatchID batch_id, const std::vector<TransferRequest> &entries);
+    int submitTransferToCopyEngine(
+        batch_id_t batch_id, const std::vector<transfer_request_t> &entries,
+        const std::string &server_name, uint16_t port);
 
-    std::unique_ptr<TransferEngine> engine_;
+    transfer_engine_t engine_;
+
+    // Local server name (also serves as the local RAM segment name)
+    std::string local_server_name_;
 
     // TCP connections to CopyTransferEngine instances (server_name -> fd)
     std::unordered_map<std::string, int> copy_engine_connections_;

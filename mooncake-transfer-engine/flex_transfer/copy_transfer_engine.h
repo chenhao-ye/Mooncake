@@ -16,14 +16,13 @@
 #define COPY_TRANSFER_ENGINE_H_
 
 #include <atomic>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
-#include "transfer_engine.h"
+#include "transfer_engine_c.h"
 
 namespace mooncake {
 
@@ -40,20 +39,13 @@ namespace mooncake {
  */
 class CopyTransferEngine {
    public:
-    CopyTransferEngine(bool auto_discover = false)
-        : engine_(std::make_unique<TransferEngine>(auto_discover)),
+    CopyTransferEngine()
+        : engine_(nullptr),
           worker_running_(false),
           listener_fd_(-1),
           tcp_port_(0) {}
 
-    CopyTransferEngine(bool auto_discover,
-                       const std::vector<std::string> &filter)
-        : engine_(std::make_unique<TransferEngine>(auto_discover, filter)),
-          worker_running_(false),
-          listener_fd_(-1),
-          tcp_port_(0) {}
-
-    ~CopyTransferEngine() { stopListener(); }
+    ~CopyTransferEngine();
 
     /**
      * Initialize the transfer engine and start TCP listener.
@@ -61,41 +53,35 @@ class CopyTransferEngine {
     int init(const std::string &metadata_conn_string,
              const std::string &local_server_name,
              const std::string &ip_or_host_name = "", uint64_t rpc_port = 12345,
-             uint16_t tcp_port = 12346);
+             uint16_t tcp_port = 12346, int auto_discover = 1);
 
     /**
      * Open a segment by name.
      */
-    SegmentHandle openSegment(const std::string &segment_name) {
-        return engine_->openSegment(segment_name);
-    }
+    segment_id_t openSegment(const std::string &segment_name);
 
     /**
      * Close a segment.
      */
-    int closeSegment(SegmentHandle handle) {
-        return engine_->closeSegment(handle);
-    }
+    int closeSegment(segment_id_t segment_id);
 
     /**
      * Register local memory - keeps a record of the memory region and
      * allocates/registers RDMA buffers if needed.
      */
     int registerLocalMemory(void *addr, size_t length,
-                            const std::string &location = kWildcardLocation,
-                            bool remote_accessible = true,
-                            bool update_metadata = true);
+                            const std::string &location, int remote_accessible);
 
     /**
      * Unregister local memory - only removes from internal data structures.
      */
-    int unregisterLocalMemory(void *addr, bool update_metadata = true);
+    int unregisterLocalMemory(void *addr);
 
     /**
      * Register a batch of local memory buffers - keeps records and
      * allocates/registers RDMA buffers if needed.
      */
-    int registerLocalMemoryBatch(const std::vector<BufferEntry> &buffer_list,
+    int registerLocalMemoryBatch(const std::vector<buffer_entry_t> &buffer_list,
                                  const std::string &location);
 
     /**
@@ -107,9 +93,7 @@ class CopyTransferEngine {
     /**
      * Sync segment cache with metadata server.
      */
-    int syncSegmentCache(const std::string &segment_name = "") {
-        return engine_->syncSegmentCache(segment_name);
-    }
+    int syncSegmentCache();
 
     /**
      * Get the TCP port that the listener is bound to.
@@ -117,9 +101,9 @@ class CopyTransferEngine {
     uint16_t getTcpPort() const { return tcp_port_; }
 
     /**
-     * Get the underlying TransferEngine.
+     * Get the underlying TransferEngine handle.
      */
-    TransferEngine *getEngine() { return engine_.get(); }
+    transfer_engine_t getEngine() { return engine_; }
 
    private:
     struct MemoryRegion {
@@ -129,10 +113,11 @@ class CopyTransferEngine {
     };
 
     struct BufferPair {
-        void *buffer1;
-        void *buffer2;
-        size_t size;
-        bool is_gpu;  // true if CUDA memory, false if CPU memory
+        void *base_buffer;  // Single contiguous allocation for both buffers
+        void *buffer1;      // First half of base_buffer
+        void *buffer2;      // Second half of base_buffer
+        size_t size;        // Size of each half
+        bool is_gpu;        // true if CUDA memory, false if CPU memory
         bool buffer1_in_use;
         bool buffer2_in_use;
     };
@@ -183,7 +168,7 @@ class CopyTransferEngine {
      */
     std::string getLocation(void *addr);
 
-    std::unique_ptr<TransferEngine> engine_;
+    transfer_engine_t engine_;
 
     // Registered memory regions (addr -> region info)
     std::unordered_map<void *, MemoryRegion> registered_regions_;
@@ -192,6 +177,10 @@ class CopyTransferEngine {
     // Buffer pool per location (location -> buffer pair)
     std::unordered_map<std::string, BufferPair *> buffer_pool_;
     std::mutex pool_mutex_;
+
+    // Segment cache (segment_name -> segment_id)
+    std::unordered_map<std::string, segment_id_t> segment_cache_;
+    std::mutex segment_cache_mutex_;
 
     // TCP listener and worker
     std::thread worker_thread_;

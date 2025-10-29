@@ -28,29 +28,70 @@
 #endif
 
 #include "common.h"
-#include "error.h"
 
 namespace mooncake {
+
+CopyTransferEngine::~CopyTransferEngine() {
+    stopListener();
+
+    // Clean up buffer pool
+    {
+        std::lock_guard<std::mutex> pool_lock(pool_mutex_);
+        for (auto &[location, pair] : buffer_pool_) {
+            if (pair) {
+                ::unregisterLocalMemory(engine_, pair->base_buffer);
+                if (pair->is_gpu) {
+#ifdef USE_CUDA
+                    cudaFree(pair->base_buffer);
+#endif
+                } else {
+                    free(pair->base_buffer);
+                }
+                delete pair;
+            }
+        }
+        buffer_pool_.clear();
+    }
+
+    // Close all cached segments
+    {
+        std::lock_guard<std::mutex> segment_lock(segment_cache_mutex_);
+        for (auto &[segment_name, segment_id] : segment_cache_) {
+            ::closeSegment(engine_, segment_id);
+        }
+        segment_cache_.clear();
+    }
+
+    // Destroy the transfer engine
+    if (engine_) {
+        ::destroyTransferEngine(engine_);
+        engine_ = nullptr;
+    }
+}
 
 int CopyTransferEngine::init(const std::string &metadata_conn_string,
                              const std::string &local_server_name,
                              const std::string &ip_or_host_name,
-                             uint64_t rpc_port, uint16_t tcp_port) {
+                             uint64_t rpc_port, uint16_t tcp_port,
+                             int auto_discover) {
     local_server_name_ = local_server_name;
 
     // Initialize underlying TransferEngine
-    int ret = engine_->init(metadata_conn_string, local_server_name,
-                            ip_or_host_name, rpc_port);
-    if (ret < 0) {
+    engine_ = ::createTransferEngine(
+        metadata_conn_string.c_str(), local_server_name.c_str(),
+        ip_or_host_name.c_str(), rpc_port, auto_discover);
+    if (engine_ == nullptr) {
         std::cerr << "Failed to initialize underlying TransferEngine"
                   << std::endl;
-        return ret;
+        return -1;
     }
 
     // Start TCP listener
-    ret = startListener(ip_or_host_name, tcp_port);
+    int ret = startListener(ip_or_host_name, tcp_port);
     if (ret < 0) {
         std::cerr << "Failed to start TCP listener" << std::endl;
+        ::destroyTransferEngine(engine_);
+        engine_ = nullptr;
         return ret;
     }
 
@@ -58,10 +99,17 @@ int CopyTransferEngine::init(const std::string &metadata_conn_string,
     return 0;
 }
 
+segment_id_t CopyTransferEngine::openSegment(const std::string &segment_name) {
+    return ::openSegment(engine_, segment_name.c_str());
+}
+
+int CopyTransferEngine::closeSegment(segment_id_t segment_id) {
+    return ::closeSegment(engine_, segment_id);
+}
+
 int CopyTransferEngine::registerLocalMemory(void *addr, size_t length,
                                             const std::string &location,
-                                            bool remote_accessible,
-                                            bool update_metadata) {
+                                            int remote_accessible) {
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
 
     // Check if already registered
@@ -96,8 +144,8 @@ int CopyTransferEngine::registerLocalMemory(void *addr, size_t length,
         if (it != buffer_pool_.end()) {
             // Free old buffer pair
             BufferPair *old_pair = it->second;
-            engine_->unregisterLocalMemory(old_pair->buffer1, true);
-            engine_->unregisterLocalMemory(old_pair->buffer2, true);
+            ::unregisterLocalMemory(engine_, old_pair->buffer1);
+            ::unregisterLocalMemory(engine_, old_pair->buffer2);
             if (old_pair->is_gpu) {
 #ifdef USE_CUDA
                 cudaFree(old_pair->buffer1);
@@ -128,8 +176,7 @@ int CopyTransferEngine::registerLocalMemory(void *addr, size_t length,
     return 0;
 }
 
-int CopyTransferEngine::unregisterLocalMemory(void *addr,
-                                              bool update_metadata) {
+int CopyTransferEngine::unregisterLocalMemory(void *addr) {
     std::lock_guard<std::mutex> lock(regions_mutex_);
 
     auto it = registered_regions_.find(addr);
@@ -145,7 +192,8 @@ int CopyTransferEngine::unregisterLocalMemory(void *addr,
 }
 
 int CopyTransferEngine::registerLocalMemoryBatch(
-    const std::vector<BufferEntry> &buffer_list, const std::string &location) {
+    const std::vector<buffer_entry_t> &buffer_list,
+    const std::string &location) {
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
 
     // Find the largest buffer in the batch
@@ -180,8 +228,8 @@ int CopyTransferEngine::registerLocalMemoryBatch(
         if (it != buffer_pool_.end()) {
             // Free old buffer pair
             BufferPair *old_pair = it->second;
-            engine_->unregisterLocalMemory(old_pair->buffer1, true);
-            engine_->unregisterLocalMemory(old_pair->buffer2, true);
+            ::unregisterLocalMemory(engine_, old_pair->buffer1);
+            ::unregisterLocalMemory(engine_, old_pair->buffer2);
             if (old_pair->is_gpu) {
 #ifdef USE_CUDA
                 cudaFree(old_pair->buffer1);
@@ -224,6 +272,10 @@ int CopyTransferEngine::unregisterLocalMemoryBatch(
 
     std::cerr << "Unregistered " << addr_list.size() << " buffers" << std::endl;
     return 0;
+}
+
+int CopyTransferEngine::syncSegmentCache() {
+    return ::syncSegmentCache(engine_);
 }
 
 int CopyTransferEngine::startListener(const std::string &ip_or_host_name,
@@ -349,6 +401,47 @@ void CopyTransferEngine::workerThread() {
 }
 
 void CopyTransferEngine::handleAndProcessRequest(int client_fd) {
+    // Read segment name length
+    uint32_t segment_name_len;
+    if (readFully(client_fd, &segment_name_len, sizeof(segment_name_len)) !=
+        sizeof(segment_name_len)) {
+        std::cerr << "Failed to read segment name length" << std::endl;
+        close(client_fd);
+        return;
+    }
+
+    // Read segment name
+    std::string segment_name(segment_name_len, '\0');
+    if (readFully(client_fd, &segment_name[0], segment_name_len) !=
+        segment_name_len) {
+        std::cerr << "Failed to read segment name" << std::endl;
+        close(client_fd);
+        return;
+    }
+
+    std::cerr << "Received request for segment: " << segment_name << std::endl;
+
+    // Get or open segment
+    segment_id_t target_segment_id;
+    {
+        std::lock_guard<std::mutex> lock(segment_cache_mutex_);
+        auto it = segment_cache_.find(segment_name);
+        if (it != segment_cache_.end()) {
+            target_segment_id = it->second;
+        } else {
+            target_segment_id = ::openSegment(engine_, segment_name.c_str());
+            if (target_segment_id < 0) {
+                std::cerr << "Failed to open segment: " << segment_name
+                          << std::endl;
+                close(client_fd);
+                return;
+            }
+            segment_cache_[segment_name] = target_segment_id;
+            std::cerr << "Opened and cached segment: " << segment_name
+                      << " (id=" << target_segment_id << ")" << std::endl;
+        }
+    }
+
     // Read batch info
     struct BatchInfo {
         uint64_t progress_addr;
@@ -408,21 +501,21 @@ void CopyTransferEngine::handleAndProcessRequest(int client_fd) {
                       << std::endl;
             // Write -1 to progress address to indicate error
             int64_t error_val = -1;
-            BatchID batch_id = engine_->allocateBatchID(1);
-            TransferRequest error_req;
-            error_req.opcode = TransferRequest::WRITE;
+            batch_id_t batch_id = ::allocateBatchID(engine_, 1);
+            transfer_request_t error_req;
+            error_req.opcode = OPCODE_WRITE;
             error_req.source = &error_val;
-            error_req.target_id = 0;  // Local segment
+            error_req.target_id = LOCAL_SEGMENT;
             error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
             error_req.length = sizeof(int64_t);
-            engine_->submitTransfer(batch_id, {error_req});
+            ::submitTransfer(engine_, batch_id, &error_req, 1);
             // Wait for completion
-            TransferStatus status;
-            while (engine_->getTransferStatus(batch_id, 0, status).ok() &&
-                   status.s != TransferStatusEnum::COMPLETED) {
+            transfer_status_t status;
+            while (::getTransferStatus(engine_, batch_id, 0, &status) == 0 &&
+                   status.status != STATUS_COMPLETED) {
                 usleep(1000);
             }
-            engine_->freeBatchID(batch_id);
+            ::freeBatchID(engine_, batch_id);
             close(client_fd);
             return;
         }
@@ -441,20 +534,20 @@ void CopyTransferEngine::handleAndProcessRequest(int client_fd) {
                       << std::endl;
             // Write -1 to progress address to indicate error
             int64_t error_val = -1;
-            BatchID batch_id = engine_->allocateBatchID(1);
-            TransferRequest error_req;
-            error_req.opcode = TransferRequest::WRITE;
+            batch_id_t batch_id = ::allocateBatchID(engine_, 1);
+            transfer_request_t error_req;
+            error_req.opcode = OPCODE_WRITE;
             error_req.source = &error_val;
-            error_req.target_id = 0;  // Local segment
+            error_req.target_id = LOCAL_SEGMENT;
             error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
             error_req.length = sizeof(int64_t);
-            engine_->submitTransfer(batch_id, {error_req});
-            TransferStatus status;
-            while (engine_->getTransferStatus(batch_id, 0, status).ok() &&
-                   status.s != TransferStatusEnum::COMPLETED) {
+            ::submitTransfer(engine_, batch_id, &error_req, 1);
+            transfer_status_t status;
+            while (::getTransferStatus(engine_, batch_id, 0, &status) == 0 &&
+                   status.status != STATUS_COMPLETED) {
                 usleep(1000);
             }
-            engine_->freeBatchID(batch_id);
+            ::freeBatchID(engine_, batch_id);
             close(client_fd);
             return;
         }
@@ -470,57 +563,112 @@ void CopyTransferEngine::handleAndProcessRequest(int client_fd) {
                       << " to buffer " << buffer << std::endl;
             // Write -1 to progress address to indicate error
             int64_t error_val = -1;
-            BatchID batch_id = engine_->allocateBatchID(1);
-            TransferRequest error_req;
-            error_req.opcode = TransferRequest::WRITE;
+            batch_id_t batch_id = ::allocateBatchID(engine_, 1);
+            transfer_request_t error_req;
+            error_req.opcode = OPCODE_WRITE;
             error_req.source = &error_val;
-            error_req.target_id = 0;  // Local segment
+            error_req.target_id = LOCAL_SEGMENT;
             error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
             error_req.length = sizeof(int64_t);
-            engine_->submitTransfer(batch_id, {error_req});
-            TransferStatus status;
-            while (engine_->getTransferStatus(batch_id, 0, status).ok() &&
-                   status.s != TransferStatusEnum::COMPLETED) {
+            ::submitTransfer(engine_, batch_id, &error_req, 1);
+            transfer_status_t status;
+            while (::getTransferStatus(engine_, batch_id, 0, &status) == 0 &&
+                   status.status != STATUS_COMPLETED) {
                 usleep(1000);
             }
-            engine_->freeBatchID(batch_id);
+            ::freeBatchID(engine_, batch_id);
             close(client_fd);
             return;
         }
 
-        // Submit RDMA write from buffer to remote
-        // TODO: Get the actual target info from the DirectTransferEngine
-        // For now, we'll skip the actual RDMA transfer in this simplified
-        // version In a real implementation, this would:
-        // 1. Allocate a batch ID
-        // 2. Create a TransferRequest to write from buffer to remote
-        // 3. Submit the transfer
-        // 4. Wait for completion
-        // 5. Update progress counter
+        // Submit RDMA write from buffer to remote target
+        batch_id_t write_batch_id = ::allocateBatchID(engine_, 1);
+        transfer_request_t write_req;
+        write_req.opcode = OPCODE_WRITE;
+        write_req.source = buffer;
+        write_req.target_id = target_segment_id;
+        write_req.target_offset = requests[i].target_addr;
+        write_req.length = length;
+
+        int submit_ret = ::submitTransfer(engine_, write_batch_id, &write_req, 1);
+        if (submit_ret < 0) {
+            std::cerr << "Failed to submit RDMA write" << std::endl;
+            ::freeBatchID(engine_, write_batch_id);
+            // Write -1 to progress address to indicate error
+            int64_t error_val = -1;
+            batch_id_t error_batch = ::allocateBatchID(engine_, 1);
+            transfer_request_t error_req;
+            error_req.opcode = OPCODE_WRITE;
+            error_req.source = &error_val;
+            error_req.target_id = LOCAL_SEGMENT;
+            error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
+            error_req.length = sizeof(int64_t);
+            ::submitTransfer(engine_, error_batch, &error_req, 1);
+            transfer_status_t status;
+            while (::getTransferStatus(engine_, error_batch, 0, &status) == 0 &&
+                   status.status != STATUS_COMPLETED) {
+                usleep(1000);
+            }
+            ::freeBatchID(engine_, error_batch);
+            close(client_fd);
+            return;
+        }
+
+        // Wait for RDMA write to complete
+        transfer_status_t write_status;
+        while (::getTransferStatus(engine_, write_batch_id, 0, &write_status) == 0 &&
+               write_status.status != STATUS_COMPLETED) {
+            usleep(1000);
+        }
+        ::freeBatchID(engine_, write_batch_id);
+
+        if (write_status.status != STATUS_COMPLETED) {
+            std::cerr << "RDMA write failed with status " << write_status.status
+                      << std::endl;
+            // Write -1 to progress address to indicate error
+            int64_t error_val = -1;
+            batch_id_t error_batch = ::allocateBatchID(engine_, 1);
+            transfer_request_t error_req;
+            error_req.opcode = OPCODE_WRITE;
+            error_req.source = &error_val;
+            error_req.target_id = LOCAL_SEGMENT;
+            error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
+            error_req.length = sizeof(int64_t);
+            ::submitTransfer(engine_, error_batch, &error_req, 1);
+            transfer_status_t status;
+            while (::getTransferStatus(engine_, error_batch, 0, &status) == 0 &&
+                   status.status != STATUS_COMPLETED) {
+                usleep(1000);
+            }
+            ::freeBatchID(engine_, error_batch);
+            close(client_fd);
+            return;
+        }
 
         std::cerr << "Processed request " << i << ": copied " << length
                   << " bytes from " << source_addr << " to buffer " << buffer
-                  << std::endl;
+                  << ", wrote to target segment " << target_segment_id
+                  << " offset " << requests[i].target_addr << std::endl;
     }
 
     // Update progress to indicate completion
     int64_t completion_val = requests.size();
-    BatchID batch_id = engine_->allocateBatchID(1);
-    TransferRequest progress_req;
-    progress_req.opcode = TransferRequest::WRITE;
+    batch_id_t batch_id = ::allocateBatchID(engine_, 1);
+    transfer_request_t progress_req;
+    progress_req.opcode = OPCODE_WRITE;
     progress_req.source = &completion_val;
-    progress_req.target_id = 0;  // Local segment
+    progress_req.target_id = LOCAL_SEGMENT;
     progress_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
     progress_req.length = sizeof(int64_t);
-    engine_->submitTransfer(batch_id, {progress_req});
+    ::submitTransfer(engine_, batch_id, &progress_req, 1);
 
     // Wait for completion
-    TransferStatus status;
-    while (engine_->getTransferStatus(batch_id, 0, status).ok() &&
-           status.s != TransferStatusEnum::COMPLETED) {
+    transfer_status_t status;
+    while (::getTransferStatus(engine_, batch_id, 0, &status) == 0 &&
+           status.status != STATUS_COMPLETED) {
         usleep(1000);
     }
-    engine_->freeBatchID(batch_id);
+    ::freeBatchID(engine_, batch_id);
 
     close(client_fd);
     std::cerr << "Completed transfer request" << std::endl;
@@ -539,16 +687,13 @@ CopyTransferEngine::BufferPair *CopyTransferEngine::getOrAllocateBufferPair(
     if (it != buffer_pool_.end()) {
         // Free old buffer pair
         BufferPair *old_pair = it->second;
-        engine_->unregisterLocalMemory(old_pair->buffer1, true);
-        engine_->unregisterLocalMemory(old_pair->buffer2, true);
+        ::unregisterLocalMemory(engine_, old_pair->base_buffer);
         if (old_pair->is_gpu) {
 #ifdef USE_CUDA
-            cudaFree(old_pair->buffer1);
-            cudaFree(old_pair->buffer2);
+            cudaFree(old_pair->base_buffer);
 #endif
         } else {
-            free(old_pair->buffer1);
-            free(old_pair->buffer2);
+            free(old_pair->base_buffer);
         }
         delete old_pair;
     }
@@ -568,19 +713,20 @@ CopyTransferEngine::BufferPair *CopyTransferEngine::allocateBufferPair(
     pair->buffer1_in_use = false;
     pair->buffer2_in_use = false;
 
+    // Allocate one contiguous buffer that's 2*size
+    size_t total_size = 2 * size;
     if (pair->is_gpu) {
 #ifdef USE_CUDA
-        cudaError_t err1 = cudaMalloc(&pair->buffer1, size);
-        cudaError_t err2 = cudaMalloc(&pair->buffer2, size);
-        if (err1 != cudaSuccess || err2 != cudaSuccess) {
+        cudaError_t err = cudaMalloc(&pair->base_buffer, total_size);
+        if (err != cudaSuccess) {
             std::cerr << "Failed to allocate GPU memory: "
-                      << cudaGetErrorString(err1) << ", "
-                      << cudaGetErrorString(err2) << std::endl;
-            if (err1 == cudaSuccess) cudaFree(pair->buffer1);
-            if (err2 == cudaSuccess) cudaFree(pair->buffer2);
+                      << cudaGetErrorString(err) << std::endl;
             delete pair;
             return nullptr;
         }
+        // Split into two halves
+        pair->buffer1 = pair->base_buffer;
+        pair->buffer2 = static_cast<char *>(pair->base_buffer) + size;
 #else
         std::cerr << "GPU memory requested but CUDA support not compiled"
                   << std::endl;
@@ -588,39 +734,35 @@ CopyTransferEngine::BufferPair *CopyTransferEngine::allocateBufferPair(
         return nullptr;
 #endif
     } else {
-        pair->buffer1 = malloc(size);
-        pair->buffer2 = malloc(size);
-        if (pair->buffer1 == nullptr || pair->buffer2 == nullptr) {
+        pair->base_buffer = malloc(total_size);
+        if (pair->base_buffer == nullptr) {
             std::cerr << "Failed to allocate CPU memory" << std::endl;
-            if (pair->buffer1) free(pair->buffer1);
-            if (pair->buffer2) free(pair->buffer2);
             delete pair;
             return nullptr;
         }
+        // Split into two halves
+        pair->buffer1 = pair->base_buffer;
+        pair->buffer2 = static_cast<char *>(pair->base_buffer) + size;
     }
 
-    // Register buffers with RDMA
-    int ret1 =
-        engine_->registerLocalMemory(pair->buffer1, size, location, true, true);
-    int ret2 =
-        engine_->registerLocalMemory(pair->buffer2, size, location, true, true);
-    if (ret1 < 0 || ret2 < 0) {
-        std::cerr << "Failed to register buffers with RDMA" << std::endl;
+    // Register the entire contiguous buffer with RDMA
+    int ret = ::registerLocalMemory(engine_, pair->base_buffer, total_size,
+                                     location.c_str(), 1);
+    if (ret < 0) {
+        std::cerr << "Failed to register buffer with RDMA" << std::endl;
         if (pair->is_gpu) {
 #ifdef USE_CUDA
-            cudaFree(pair->buffer1);
-            cudaFree(pair->buffer2);
+            cudaFree(pair->base_buffer);
 #endif
         } else {
-            free(pair->buffer1);
-            free(pair->buffer2);
+            free(pair->base_buffer);
         }
         delete pair;
         return nullptr;
     }
 
     std::cerr << "Allocated buffer pair of size " << size << " for location "
-              << location << std::endl;
+              << location << " (total=" << total_size << ")" << std::endl;
     return pair;
 }
 

@@ -29,7 +29,7 @@ CopyTransferEngine will have a background thread listening on TCP to initiate da
 
 ## DirectTransferEngine Reads from CopyTransferEnginie
 
-Currently, DirectTransferEngine only supports to read data from CopyTransferEngine; other supports may be addded later. When the user call `submitTransfer` to DirectTransferEngine, it can set a flag to specify the target is a CopyTransferEngine (such transfer batch should only contain read requests; an error will be thrown if any non-read request detected during executioln).
+Currently, DirectTransferEngine only supports to read data from CopyTransferEngine; other supports may be addded later. When the user calls `submitTransfer` to DirectTransferEngine, they can provide the CopyTransferEngine's server name and TCP port. If provided, the transfer will use the copy-based approach via TCP (such transfer batch should only contain read requests; an error will be thrown if any non-read request is detected during execution). If the server name is empty, normal RDMA transfer will be used.
 
 DirectTransferEngine first sends the batch info to the CopyTransferEngine via TCP. The background listener thread will receive a "progress" address, a counter of how many requests, and a sequence of addr-size pairs as requests; it then starts to transfer the data:
 1. It first confirms the given addresses are registered; return an error if not.
@@ -62,34 +62,34 @@ The following components are built:
 #include "direct_transfer_engine.h"
 
 // On the target node (server with frequently changing memory regions)
-CopyTransferEngine copy_engine(true);
-copy_engine.init(metadata_server, local_server_name, "", 12345, 12346);
+CopyTransferEngine copy_engine;
+copy_engine.init(metadata_server, local_server_name, "", 12345, 12346, 1);
 
 // Register memory that changes frequently
 void *data = malloc(size);
-copy_engine.registerLocalMemory(data, size, "cpu", true, true);
+copy_engine.registerLocalMemory(data, size, "cpu", 1);
 
 // On the initiator node (client that reads data)
-DirectTransferEngine direct_engine(true);
-direct_engine.init(metadata_server, local_server_name, "", 12345);
+DirectTransferEngine direct_engine;
+direct_engine.init(metadata_server, local_server_name, "", 12345, 1);
 
 // Allocate local buffer
 void *local_buffer = malloc(size);
-direct_engine.registerLocalMemory(local_buffer, size, "cpu", true, true);
+direct_engine.registerLocalMemory(local_buffer, size, "cpu", 1);
 
 // Submit read requests from CopyTransferEngine
-BatchID batch_id = direct_engine.allocateBatchID(1);
-std::vector<TransferRequest> requests;
-TransferRequest req;
-req.opcode = TransferRequest::READ;
+batch_id_t batch_id = direct_engine.allocateBatchID(1);
+std::vector<transfer_request_t> requests;
+transfer_request_t req;
+req.opcode = OPCODE_READ;
 req.source = remote_addr;  // Address on CopyTransferEngine
-req.target_id = 0;          // Local segment
+req.target_id = LOCAL_SEGMENT;
 req.target_offset = (uint64_t)local_buffer;
 req.length = size;
 requests.push_back(req);
 
-// Submit with flag indicating target is CopyTransferEngine
-direct_engine.submitTransfer(batch_id, requests, /*target_is_copy_engine=*/true);
+// Submit with CopyTransferEngine server name and port
+direct_engine.submitTransfer(batch_id, requests, "target_server", 12346);
 ```
 
 ### Running the Example

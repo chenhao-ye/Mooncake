@@ -43,9 +43,9 @@ int main(int argc, char **argv) {
         // Run as CopyTransferEngine (target/server)
         std::cerr << "Starting CopyTransferEngine..." << std::endl;
 
-        CopyTransferEngine copy_engine(true);
+        CopyTransferEngine copy_engine;
         int ret = copy_engine.init(metadata_server, local_server_name, "",
-                                   12345, 12346);
+                                   12345, 12346, 1);
         if (ret < 0) {
             std::cerr << "Failed to initialize CopyTransferEngine" << std::endl;
             return 1;
@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
 
         // Register the buffer
         ret = copy_engine.registerLocalMemory(test_buffer, buffer_size, "cpu",
-                                              true, true);
+                                              1);
         if (ret < 0) {
             std::cerr << "Failed to register test buffer" << std::endl;
             free(test_buffer);
@@ -90,9 +90,9 @@ int main(int argc, char **argv) {
         // Run as DirectTransferEngine (initiator/client)
         std::cerr << "Starting DirectTransferEngine..." << std::endl;
 
-        DirectTransferEngine direct_engine(true);
+        DirectTransferEngine direct_engine;
         int ret =
-            direct_engine.init(metadata_server, local_server_name, "", 12345);
+            direct_engine.init(metadata_server, local_server_name, "", 12345, 1);
         if (ret < 0) {
             std::cerr << "Failed to initialize DirectTransferEngine"
                       << std::endl;
@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
 
         // Register local buffer
         ret = direct_engine.registerLocalMemory(local_buffer, buffer_size,
-                                                "cpu", true, true);
+                                                "cpu", 1);
         if (ret < 0) {
             std::cerr << "Failed to register local buffer" << std::endl;
             free(local_buffer);
@@ -129,7 +129,7 @@ int main(int argc, char **argv) {
         // TODO: In a real implementation, we would:
         // 1. Open the remote segment
         // 2. Create transfer requests to read from CopyTransferEngine
-        // 3. Submit the transfer with target_is_copy_engine=true
+        // 3. Submit the transfer with copy_server_name and copy_server_port
         // 4. Wait for completion
         // 5. Verify the data
 

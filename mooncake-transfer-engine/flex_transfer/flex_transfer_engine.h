@@ -16,6 +16,7 @@
 #define FLEX_TRANSFER_ENGINE_H_
 
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -26,6 +27,65 @@
 
 namespace mooncake {
 
+// Forward declaration
+class FlexTransferEngine;
+
+/**
+ * Control block for copy-based transfers.
+ * Contains progress counter that is RDMA-accessible.
+ */
+struct CopyCtrlBlock {
+    int64_t progress_counter;
+};
+
+/**
+ * FlexBatch represents a batch transfer operation.
+ * It manages the batch lifecycle including freeing the batch ID and
+ * returning the CopyCtrlBlock to the engine cache on destruction.
+ */
+class FlexBatch {
+   public:
+    /**
+     * Constructor.
+     * @param engine Backpointer to the FlexTransferEngine
+     */
+    explicit FlexBatch(std::shared_ptr<FlexTransferEngine> engine)
+        : engine_(std::move(engine)),
+          batch_id_(INVALID_BATCH),
+          ctrl_block_(nullptr) {}
+
+    ~FlexBatch();
+
+    /**
+     * Add a transfer request to this batch.
+     * @param req The transfer request to add
+     */
+    void addReq(const transfer_request_t &req);
+
+    /**
+     * Submit the transfer batch.
+     *
+     * @param copy_server_url Optional server URL for copy-based transfer in
+     * format "ip_addr:port" (supports both IPv4 and IPv6). If provided,
+     * transfer will use copy-based approach via TCP. If empty, uses direct
+     * RDMA.
+     */
+    int submit(const std::string &copy_server_url = "");
+
+    /**
+     * Get the status of a transfer task.
+     * @param task_id The task ID within this batch
+     * @param status Output parameter for transfer status
+     */
+    int getTransferStatus(size_t task_id, transfer_status_t &status);
+
+   private:
+    std::shared_ptr<FlexTransferEngine> engine_;
+    batch_id_t batch_id_;
+    CopyCtrlBlock *ctrl_block_;
+    std::vector<transfer_request_t> entries_;
+};
+
 /**
  * FlexTransferEngine is a flexible wrapper on top of TransferEngine that
  * supports both direct RDMA transfers and copy-based transfers.
@@ -35,23 +95,28 @@ namespace mooncake {
  * CopyTransferEngine. It maintains pre-registered buffers to avoid frequent
  * RDMA memory registration overhead.
  *
- * When submitting transfers, users can specify a copy_server_name to use
+ * When submitting transfers, users can specify a copy_server_url to use
  * copy-based transfer via TCP, or leave it empty for direct RDMA transfer.
  */
 class FlexTransferEngine {
    public:
+    // FlexBatch needs access to private methods like releaseCopyCtrlBlock
+    friend class FlexBatch;
+
     /**
      * Constructor.
      * @param enable_copy If true, starts TCP listener for copy-based transfers
+     * @param ctrl_block_location Location for CopyCtrlBlock registration (e.g.,
+     * "cuda:0" for GPU)
      */
-    explicit FlexTransferEngine(bool enable_copy = false)
+    explicit FlexTransferEngine(bool enable_copy = false,
+                                const std::string &ctrl_block_location = "")
         : engine_(nullptr),
           enable_copy_(enable_copy),
+          ctrl_block_location_(ctrl_block_location),
           worker_running_(false),
           listener_fd_(-1),
-          tcp_port_(0),
-          progress_(0),
-          progress_registered_(false) {}
+          tcp_port_(0) {}
 
     ~FlexTransferEngine();
 
@@ -77,25 +142,36 @@ class FlexTransferEngine {
 
     /**
      * Register local memory with the transfer engine.
+     * @param force_direct If true, forces RDMA registration even when
+     * enable_copy_ is true
      */
     int registerLocalMemory(void *addr, size_t length,
-                            const std::string &location, int remote_accessible);
+                            const std::string &location, int remote_accessible,
+                            bool force_direct = false);
 
     /**
      * Unregister local memory.
+     * @param force_direct If true, forces RDMA unregistration even when
+     * enable_copy_ is true
      */
-    int unregisterLocalMemory(void *addr);
+    int unregisterLocalMemory(void *addr, bool force_direct = false);
 
     /**
      * Register a batch of local memory buffers.
+     * @param force_direct If true, forces RDMA registration even when
+     * enable_copy_ is true
      */
-    int registerLocalMemoryBatch(const std::vector<buffer_entry_t> &buffer_list,
-                                 const std::string &location);
+    int registerLocalMemoryBatch(std::vector<buffer_entry_t> &buffer_list,
+                                 const std::string &location,
+                                 bool force_direct = false);
 
     /**
      * Unregister a batch of local memory buffers.
+     * @param force_direct If true, forces RDMA unregistration even when
+     * enable_copy_ is true
      */
-    int unregisterLocalMemoryBatch(const std::vector<void *> &addr_list);
+    int unregisterLocalMemoryBatch(std::vector<void *> &addr_list,
+                                   bool force_direct = false);
 
     /**
      * Sync segment cache with metadata server.
@@ -103,39 +179,17 @@ class FlexTransferEngine {
     int syncSegmentCache();
 
     /**
-     * Allocate a batch ID for transfer operations.
-     */
-    batch_id_t allocateBatchID(size_t batch_size);
-
-    /**
-     * Free a batch ID.
-     */
-    int freeBatchID(batch_id_t batch_id);
-
-    /**
-     * Submit a transfer batch.
-     *
-     * @param batch_id The batch ID allocated by allocateBatchID.
-     * @param entries The transfer requests.
-     * @param copy_server_name Optional server name for copy-based transfer. If
-     *        provided, transfer will use copy-based approach via TCP.
-     * @param copy_server_port TCP port for copy-based transfer (default 12346).
-     */
-    int submitTransfer(batch_id_t batch_id,
-                       const std::vector<transfer_request_t> &entries,
-                       const std::string &copy_server_name = "",
-                       uint16_t copy_server_port = 12346);
-
-    /**
-     * Get the status of a transfer.
-     */
-    int getTransferStatus(batch_id_t batch_id, size_t task_id,
-                          transfer_status_t &status);
-
-    /**
      * Get the TCP port that the listener is bound to.
      */
     uint16_t getTcpPort() const { return tcp_port_; }
+
+    /**
+     * Get the copy server URL for this FlexTransferEngine instance.
+     * Returns the URL in format "ip_addr:port" that can be used by other
+     * instances to submit copy-based transfer requests.
+     * Returns empty string if enable_copy_ is false.
+     */
+    std::string getCopyServerUrl() const;
 
     /**
      * Get the underlying TransferEngine handle.
@@ -208,24 +262,41 @@ class FlexTransferEngine {
     /**
      * Connect to a remote FlexTransferEngine via TCP.
      */
-    int connectToCopyEngine(const std::string &server_name, uint16_t port);
+    int connectToCopyEngine(const std::string &server_url);
 
     /**
      * Send batch info to remote FlexTransferEngine and initiate transfer.
      */
-    int submitTransferToCopyEngine(
-        batch_id_t batch_id, const std::vector<transfer_request_t> &entries,
-        const std::string &server_name, uint16_t port);
+    int submitTransferToCopyEngine(batch_id_t batch_id,
+                                   std::vector<transfer_request_t> &entries,
+                                   const std::string &server_url,
+                                   CopyCtrlBlock *ctrl_block);
+
+    /**
+     * Acquire a CopyCtrlBlock from the cache (or allocate a new one).
+     */
+    CopyCtrlBlock *acquireCopyCtrlBlock();
+
+    /**
+     * Release a CopyCtrlBlock back to the cache.
+     */
+    void releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block);
 
     transfer_engine_t engine_;
     bool enable_copy_;  // Whether to enable copy-based transfer listener
+    std::string
+        ctrl_block_location_;  // Location for CopyCtrlBlock registration
 
     // Local server name (also serves as the local RAM segment name)
     std::string local_server_name_;
+    std::string ip_or_host_name_;  // IP or hostname for this instance
 
-    // Registered memory regions (addr -> region info)
-    // Only used when enable_copy is true
-    std::unordered_map<void *, MemoryRegion> registered_regions_;
+    // Copiable memory regions (addr -> region info)
+    // Tracks regions that can be read via copy transfer.
+    // When enable_copy_ is true, these are NOT actually RDMA-registered,
+    // only tracked for copy-based transfers.
+    // When enable_copy_ is false, these ARE RDMA-registered.
+    std::unordered_map<void *, MemoryRegion> copiable_regions_;
     std::mutex regions_mutex_;
 
     // Buffer pool per location (location -> buffer pair)
@@ -244,13 +315,13 @@ class FlexTransferEngine {
     int listener_fd_;
     uint16_t tcp_port_;
 
-    // TCP connections to remote FlexTransferEngine instances (server_name -> fd)
+    // TCP connections to remote FlexTransferEngine instances (server_url -> fd)
     std::unordered_map<std::string, int> copy_engine_connections_;
     std::mutex connections_mutex_;
 
-    // Pre-registered progress counter for copy-based transfers
-    std::atomic<int64_t> progress_;
-    bool progress_registered_;
+    // Cache of CopyCtrlBlock objects for copy-based transfers
+    std::vector<CopyCtrlBlock *> copy_ctrl_block_cache_;
+    std::mutex ctrl_block_mutex_;
 };
 
 }  // namespace mooncake

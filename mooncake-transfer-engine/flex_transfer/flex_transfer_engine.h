@@ -196,13 +196,12 @@ class FlexTransferEngine {
     };
 
     struct BufferPair {
-        void *base_buffer;  // Single contiguous allocation for both buffers
-        void *buffer1;      // First half of base_buffer
-        void *buffer2;      // Second half of base_buffer
-        size_t size;        // Size of each half
-        bool is_cuda;       // true if CUDA memory, false if CPU memory
+        void *buffer0;  // First half (also the base address of allocation)
+        void *buffer1;  // Second half
+        size_t size;    // Size of each half
+        bool is_cuda;   // true if CUDA memory, false if CPU memory
+        bool buffer0_in_use;
         bool buffer1_in_use;
-        bool buffer2_in_use;
     };
 
     /**

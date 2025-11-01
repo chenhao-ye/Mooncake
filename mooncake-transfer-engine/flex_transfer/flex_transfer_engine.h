@@ -35,7 +35,7 @@ class FlexTransferEngine;
  * Contains progress counter that is RDMA-accessible.
  */
 struct CopyCtrlBlock {
-    int64_t progress_counter;
+    volatile int64_t progress_counter;
 };
 
 /**
@@ -115,20 +115,17 @@ class FlexTransferEngine {
           enable_copy_(enable_copy),
           ctrl_block_location_(ctrl_block_location),
           worker_running_(false),
-          listener_fd_(-1),
-          tcp_port_(0) {}
+          listener_fd_(-1) {}
 
     ~FlexTransferEngine();
 
     /**
      * Initialize the transfer engine.
-     * @param tcp_port TCP port for copy-based transfer listener (only used if
-     *                 enable_copy is true)
+     * TCP port for copy-based transfer listener is automatically selected when
+     * enable_copy is true.
      */
     int init(const std::string &metadata_conn_string,
-             const std::string &local_server_name,
-             const std::string &ip_or_host_name = "", uint64_t rpc_port = 12345,
-             uint16_t tcp_port = 12346, int auto_discover = 1);
+             const std::string &local_server_name, bool auto_discover = true);
 
     /**
      * Open a segment by name.
@@ -179,11 +176,6 @@ class FlexTransferEngine {
     int syncSegmentCache();
 
     /**
-     * Get the TCP port that the listener is bound to.
-     */
-    uint16_t getTcpPort() const { return tcp_port_; }
-
-    /**
      * Get the copy server URL for this FlexTransferEngine instance.
      * Returns the URL in format "ip_addr:port" that can be used by other
      * instances to submit copy-based transfer requests.
@@ -215,8 +207,9 @@ class FlexTransferEngine {
 
     /**
      * Start the TCP listener thread (only if enable_copy is true).
+     * Automatically determines local IP and finds an available port.
      */
-    int startListener(const std::string &ip_or_host_name, uint16_t tcp_port);
+    int startListener();
 
     /**
      * Stop the TCP listener thread.
@@ -284,12 +277,10 @@ class FlexTransferEngine {
 
     transfer_engine_t engine_;
     bool enable_copy_;  // Whether to enable copy-based transfer listener
-    std::string
-        ctrl_block_location_;  // Location for CopyCtrlBlock registration
+    std::string ctrl_block_location_;  // CopyCtrlBlock registration location
 
     // Local server name (also serves as the local RAM segment name)
     std::string local_server_name_;
-    std::string ip_or_host_name_;  // IP or hostname for this instance
 
     // Copiable memory regions (addr -> region info)
     // Tracks regions that can be read via copy transfer.
@@ -313,7 +304,7 @@ class FlexTransferEngine {
     std::thread worker_thread_;
     std::atomic<bool> worker_running_;
     int listener_fd_;
-    uint16_t tcp_port_;
+    std::string local_copy_server_url_;  // Copy server URL for this instance
 
     // TCP connections to remote FlexTransferEngine instances (server_url -> fd)
     std::unordered_map<std::string, int> copy_engine_connections_;

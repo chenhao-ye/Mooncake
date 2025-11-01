@@ -44,15 +44,14 @@ int main(int argc, char **argv) {
                   << std::endl;
 
         FlexTransferEngine engine(true);  // enable_copy = true
-        int ret = engine.init(metadata_server, local_server_name, "", 12345,
-                             12346, 1);
+        int ret = engine.init(metadata_server, local_server_name);
         if (ret < 0) {
             std::cerr << "Failed to initialize FlexTransferEngine" << std::endl;
             return 1;
         }
 
-        std::cerr << "FlexTransferEngine initialized on TCP port "
-                  << engine.getTcpPort() << std::endl;
+        std::cerr << "FlexTransferEngine initialized on copy server URL: "
+                  << engine.getCopyServerUrl() << std::endl;
 
         // Allocate and register some test memory
         const size_t buffer_size = 1024 * 1024;  // 1 MB
@@ -91,8 +90,7 @@ int main(int argc, char **argv) {
                   << std::endl;
 
         FlexTransferEngine engine(false);  // enable_copy = false
-        int ret = engine.init(metadata_server, local_server_name, "", 12345,
-                             12346, 1);
+        int ret = engine.init(metadata_server, local_server_name);
         if (ret < 0) {
             std::cerr << "Failed to initialize FlexTransferEngine" << std::endl;
             return 1;

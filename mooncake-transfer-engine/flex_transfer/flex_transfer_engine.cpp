@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstring>
 #include <iostream>
 #include <sstream>
@@ -28,7 +29,7 @@
 #include <cuda_runtime.h>
 #endif
 
-#include "common.h"
+#include "util.h"
 
 namespace mooncake {
 
@@ -86,36 +87,24 @@ int FlexBatch::submit(const std::string &copy_server_url) {
 }
 
 int FlexBatch::getTransferStatus(size_t task_id, transfer_status_t &status) {
-    if (batch_id_ == INVALID_BATCH) {
-        std::cerr << "Error: FlexBatch not yet submitted" << std::endl;
-        return -1;
-    }
-
-    if (task_id >= entries_.size()) {
-        std::cerr << "Error: task_id " << task_id
-                  << " out of range (batch size: " << entries_.size() << ")"
-                  << std::endl;
-        return -1;
+    if (!ctrl_block_) {
+        // For direct transfers or force_direct, query underlying engine
+        return ::getTransferStatus(engine_->getEngine(), batch_id_, task_id,
+                                   &status);
     }
 
     // For copy-based transfers, check ctrl_block progress
-    if (ctrl_block_) {
-        int64_t progress = ctrl_block_->progress_counter;
-        if (task_id < static_cast<size_t>(progress)) {
-            // Task completed
-            status.status = STATUS_COMPLETED;
-            status.transferred_bytes = entries_[task_id].length;
-            return 0;
-        }
-        // Task still in progress or waiting
-        status.status = STATUS_PENDING;
-        status.transferred_bytes = 0;
+    int64_t progress = ctrl_block_->progress_counter;
+    if (static_cast<int64_t>(task_id) < progress) {
+        // Task completed
+        status.status = STATUS_COMPLETED;
+        status.transferred_bytes = entries_[task_id].length;
         return 0;
     }
-
-    // For direct transfers or force_direct, query underlying engine
-    return ::getTransferStatus(engine_->getEngine(), batch_id_, task_id,
-                               &status);
+    // Task still in progress or waiting
+    status.status = STATUS_PENDING;
+    status.transferred_bytes = 0;
+    return 0;
 }
 
 FlexTransferEngine::~FlexTransferEngine() {
@@ -159,16 +148,14 @@ FlexTransferEngine::~FlexTransferEngine() {
     {
         std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
         for (CopyCtrlBlock *ctrl_block : copy_ctrl_block_cache_) {
-            if (engine_ != nullptr) {
-                ::unregisterLocalMemory(engine_, ctrl_block);
-            }
+            if (engine_) ::unregisterLocalMemory(engine_, ctrl_block);
             delete ctrl_block;
         }
         copy_ctrl_block_cache_.clear();
     }
 
     // Destroy the transfer engine
-    if (engine_ != nullptr) {
+    if (engine_) {
         ::destroyTransferEngine(engine_);
         engine_ = nullptr;
     }
@@ -176,25 +163,22 @@ FlexTransferEngine::~FlexTransferEngine() {
 
 int FlexTransferEngine::init(const std::string &metadata_conn_string,
                              const std::string &local_server_name,
-                             const std::string &ip_or_host_name,
-                             uint64_t rpc_port, uint16_t tcp_port,
-                             int auto_discover) {
+                             bool auto_discover) {
     local_server_name_ = local_server_name;
-    ip_or_host_name_ = ip_or_host_name;
 
     // Create the underlying TransferEngine
-    engine_ = ::createTransferEngine(
-        metadata_conn_string.c_str(), local_server_name.c_str(),
-        ip_or_host_name.empty() ? nullptr : ip_or_host_name.c_str(), rpc_port,
-        auto_discover);
-    if (engine_ == nullptr) {
+    engine_ = ::createTransferEngine(metadata_conn_string.c_str(),
+                                     local_server_name.c_str(),
+                                     /*unused*/ local_server_name.c_str(),
+                                     /*unused*/ 12345, auto_discover);
+    if (!engine_) {
         std::cerr << "Failed to create TransferEngine" << std::endl;
         return -1;
     }
 
     // Start TCP listener only if enable_copy_ is true
     if (enable_copy_) {
-        int ret = startListener(ip_or_host_name, tcp_port);
+        int ret = startListener();
         if (ret < 0) {
             std::cerr << "Failed to start TCP listener" << std::endl;
             ::destroyTransferEngine(engine_);
@@ -236,19 +220,8 @@ int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
     {
         std::lock_guard<std::mutex> regions_lock(regions_mutex_);
 
-        // Check if already registered
-        if (copiable_regions_.find(addr) != copiable_regions_.end()) {
-            std::cerr << "Warning: Memory at " << addr << " already registered"
-                      << std::endl;
-            return 0;
-        }
-
         // Store the memory region info
-        MemoryRegion region;
-        region.addr = addr;
-        region.length = length;
-        region.location = location;
-        copiable_regions_[addr] = region;
+        copiable_regions_[addr] = {addr, length, location};
 
         std::cerr << "Registered memory at " << addr << " size " << length
                   << " location " << location << std::endl;
@@ -260,9 +233,8 @@ int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
     // Find the largest memory region for this location
     size_t max_size = length;
     for (const auto &[_, reg] : copiable_regions_) {
-        if (reg.location == location && reg.length > max_size) {
+        if (reg.location == location && reg.length > max_size)
             max_size = reg.length;
-        }
     }
 
     // Check if we have a buffer pair for this location
@@ -304,20 +276,12 @@ int FlexTransferEngine::unregisterLocalMemory(void *addr, bool force_direct) {
     if (force_direct || !enable_copy_)
         return ::unregisterLocalMemory(engine_, addr);
 
-    // Remove from tracked copiable regions
-    int ret = 0;
-    {
-        std::lock_guard<std::mutex> lock(regions_mutex_);
+    std::lock_guard<std::mutex> lock(regions_mutex_);
 
-        auto it = copiable_regions_.find(addr);
-        if (it != copiable_regions_.end()) {
-            copiable_regions_.erase(it);
-        } else {
-            ret = -1;  // Not found
-        }
-    }
-
-    return ret;
+    auto it = copiable_regions_.find(addr);
+    if (it == copiable_regions_.end()) return -1;  // Not found
+    copiable_regions_.erase(it);
+    return 0;
 }
 
 int FlexTransferEngine::registerLocalMemoryBatch(
@@ -329,23 +293,17 @@ int FlexTransferEngine::registerLocalMemoryBatch(
                                           buffer_list.size(), location.c_str());
     }
 
+    // Find the largest buffer in the batch
+    size_t max_size = 0;
     // Track copiable regions
     {
         std::lock_guard<std::mutex> regions_lock(regions_mutex_);
 
-        // Find the largest buffer in the batch
-        size_t max_size = 0;
         for (const auto &entry : buffer_list) {
-            if (entry.length > max_size) {
-                max_size = entry.length;
-            }
-
+            if (entry.length > max_size) max_size = entry.length;
             // Store the memory region info
-            MemoryRegion region;
-            region.addr = entry.addr;
-            region.length = entry.length;
-            region.location = location;
-            copiable_regions_[entry.addr] = region;
+            copiable_regions_[entry.addr] = {entry.addr, entry.length,
+                                             location};
         }
 
         std::cerr << "Registered " << buffer_list.size()
@@ -355,14 +313,6 @@ int FlexTransferEngine::registerLocalMemoryBatch(
 
     // Allocate buffer pair only if enable_copy_ is true
     std::lock_guard<std::mutex> pool_lock(pool_mutex_);
-
-    // Consider all copiable regions for this location
-    size_t max_size = 0;
-    for (const auto &[_, reg] : copiable_regions_) {
-        if (reg.location == location && reg.length > max_size) {
-            max_size = reg.length;
-        }
-    }
 
     // Check if we have a buffer pair for this location
     auto it = buffer_pool_.find(location);
@@ -415,12 +365,9 @@ int FlexTransferEngine::unregisterLocalMemoryBatch(
             if (it != copiable_regions_.end()) {
                 copiable_regions_.erase(it);
             } else {
-                ret = -1;  // Not found
+                ret = -1;  // Not found, but will continue
             }
         }
-
-        std::cerr << "Unregistered " << addr_list.size() << " buffers"
-                  << std::endl;
     }
 
     return ret;
@@ -432,93 +379,63 @@ int FlexTransferEngine::syncSegmentCache() {
 
 // Private methods from CopyTransferEngine
 
-int FlexTransferEngine::startListener(const std::string &ip_or_host_name,
-                                      uint16_t tcp_port) {
-    // Create socket
-    listener_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (listener_fd_ < 0) {
-        std::cerr << "Failed to create socket: " << strerror(errno)
-                  << std::endl;
-        return ERR_SOCKET;
-    }
-
-    // Set SO_REUSEADDR
-    int optval = 1;
-    if (setsockopt(listener_fd_, SOL_SOCKET, SO_REUSEADDR, &optval,
-                   sizeof(optval)) < 0) {
-        std::cerr << "Failed to set SO_REUSEADDR: " << strerror(errno)
-                  << std::endl;
-        close(listener_fd_);
-        return ERR_SOCKET;
-    }
-
-    // Bind to address
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(tcp_port);
-
-    if (ip_or_host_name.empty()) {
-        addr.sin_addr.s_addr = INADDR_ANY;
-    } else {
-        if (inet_pton(AF_INET, ip_or_host_name.c_str(), &addr.sin_addr) <= 0) {
-            std::cerr << "Invalid IP address: " << ip_or_host_name << std::endl;
-            close(listener_fd_);
-            return ERR_INVALID_ARGUMENT;
-        }
-    }
-
-    if (bind(listener_fd_, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        std::cerr << "Failed to bind to port " << tcp_port << ": "
-                  << strerror(errno) << std::endl;
-        close(listener_fd_);
-        return ERR_SOCKET;
-    }
-
-    // Get the actual port if tcp_port was 0
+int FlexTransferEngine::startListener() {
+    // Use findAvailableTcpPort to find an available port
+    uint16_t tcp_port = findAvailableTcpPort(listener_fd_);
     if (tcp_port == 0) {
-        socklen_t addr_len = sizeof(addr);
-        if (getsockname(listener_fd_, (struct sockaddr *)&addr, &addr_len) <
-            0) {
-            std::cerr << "Failed to get socket name: " << strerror(errno)
-                      << std::endl;
-            close(listener_fd_);
-            return ERR_SOCKET;
-        }
-        tcp_port_ = ntohs(addr.sin_port);
-    } else {
-        tcp_port_ = tcp_port;
+        std::cerr << "Failed to find available TCP port" << std::endl;
+        return -1;
     }
 
-    // Listen
+    // The socket is already bound by findAvailableTcpPort, just listen
     if (listen(listener_fd_, 128) < 0) {
-        std::cerr << "Failed to listen on port " << tcp_port_ << ": "
+        std::cerr << "Failed to listen on port " << tcp_port << ": "
                   << strerror(errno) << std::endl;
         close(listener_fd_);
-        return ERR_SOCKET;
+        listener_fd_ = -1;
+        return -1;
     }
 
     // Start worker thread
     worker_running_ = true;
     worker_thread_ = std::thread(&FlexTransferEngine::workerThread, this);
 
-    std::cerr << "TCP listener started on port " << tcp_port_ << std::endl;
+    // Determine the IP address to use for the server URL
+    auto ip_list = findLocalIpAddresses();
+    if (ip_list.empty() || ip_list[0].empty()) {
+        std::cerr << "Failed to find local IP addresses" << std::endl;
+        return -1;
+    }
+    const std::string &server_ip = ip_list[0];
+
+    // Set local_copy_server_url_
+    std::ostringstream oss;
+    // Check if the IP is IPv6 (contains ':')
+    bool is_ipv6 = (server_ip.find(':') != std::string::npos);
+    if (is_ipv6)
+        oss << "[" << server_ip << "]:" << tcp_port;
+    else
+        oss << server_ip << ":" << tcp_port;
+
+    local_copy_server_url_ = oss.str();
+
+    std::cerr << "TCP listener started on " << local_copy_server_url_
+              << std::endl;
     return 0;
 }
 
 void FlexTransferEngine::stopListener() {
-    if (worker_running_) {
-        worker_running_ = false;
+    if (worker_running_.load(std::memory_order_acquire)) {
+        worker_running_.store(false, std::memory_order_release);
+        // Wait for worker thread to finish
+        if (worker_thread_.joinable()) {
+            worker_thread_.join();
+        }
 
         // Close listener socket to unblock accept()
         if (listener_fd_ >= 0) {
             close(listener_fd_);
             listener_fd_ = -1;
-        }
-
-        // Wait for worker thread to finish
-        if (worker_thread_.joinable()) {
-            worker_thread_.join();
         }
 
         std::cerr << "TCP listener stopped" << std::endl;
@@ -528,14 +445,14 @@ void FlexTransferEngine::stopListener() {
 void FlexTransferEngine::workerThread() {
     std::cerr << "Worker thread started" << std::endl;
 
-    while (worker_running_) {
+    while (worker_running_.load(std::memory_order_acquire)) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
 
         int client_fd =
             accept(listener_fd_, (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) {
-            if (worker_running_) {
+            if (worker_running_.load(std::memory_order_acquire)) {
                 std::cerr << "Failed to accept connection: " << strerror(errno)
                           << std::endl;
             }
@@ -560,6 +477,14 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
     if (readFully(client_fd, &segment_name_len, sizeof(segment_name_len)) !=
         sizeof(segment_name_len)) {
         std::cerr << "Failed to read segment name length" << std::endl;
+        close(client_fd);
+        return;
+    }
+
+    const static size_t kMaxLength = 1ull << 20;
+    if (segment_name_len == 0 || segment_name_len > kMaxLength) {
+        std::cerr << "Invalid segment name length: " << segment_name_len
+                  << std::endl;
         close(client_fd);
         return;
     }
@@ -1108,9 +1033,7 @@ int FlexTransferEngine::submitTransferToCopyEngine(
         }
     }
 
-    if (entries.empty()) {
-        return 0;
-    }
+    if (entries.empty()) return 0;
 
     if (ctrl_block == nullptr) {
         std::cerr << "Error: ctrl_block is nullptr for copy-based transfer"
@@ -1212,32 +1135,7 @@ int FlexTransferEngine::submitTransferToCopyEngine(
 }
 
 std::string FlexTransferEngine::getCopyServerUrl() const {
-    if (!enable_copy_ || tcp_port_ == 0) {
-        return "";
-    }
-
-    std::string ip = ip_or_host_name_;
-
-    // If ip_or_host_name_ is empty, try to get local IP
-    if (ip.empty()) {
-        // Use local_server_name_ as fallback
-        ip = local_server_name_;
-    }
-
-    // Check if the IP is IPv6 (contains ':')
-    // Note: This is a simple heuristic; a proper check would parse the address
-    bool is_ipv6 = (ip.find(':') != std::string::npos);
-
-    std::ostringstream oss;
-    if (is_ipv6) {
-        // IPv6 format: [addr]:port
-        oss << "[" << ip << "]:" << tcp_port_;
-    } else {
-        // IPv4 format: addr:port
-        oss << ip << ":" << tcp_port_;
-    }
-
-    return oss.str();
+    return local_copy_server_url_;
 }
 
 }  // namespace mooncake

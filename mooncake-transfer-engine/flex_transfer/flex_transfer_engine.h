@@ -154,7 +154,7 @@ class FlexTransferEngine {
         void *buffer1;      // First half of base_buffer
         void *buffer2;      // Second half of base_buffer
         size_t size;        // Size of each half
-        bool is_gpu;        // true if CUDA memory, false if CPU memory
+        bool is_cuda;       // true if CUDA memory, false if CPU memory
         bool buffer1_in_use;
         bool buffer2_in_use;
     };
@@ -193,7 +193,7 @@ class FlexTransferEngine {
     /**
      * Copy data from source to destination (handles both CPU and GPU memory).
      */
-    int copyMemory(void *dst, const void *src, size_t size, bool is_gpu);
+    int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
     /**
      * Check if an address is registered.

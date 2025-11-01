@@ -41,7 +41,7 @@ FlexTransferEngine::~FlexTransferEngine() {
         for (auto &[location, pair] : buffer_pool_) {
             if (pair) {
                 ::unregisterLocalMemory(engine_, pair->base_buffer);
-                if (pair->is_gpu) {
+                if (pair->is_cuda) {
 #ifdef USE_CUDA
                     cudaFree(pair->base_buffer);
 #endif
@@ -189,7 +189,7 @@ int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
                 // Free old buffer pair
                 BufferPair *old_pair = it->second;
                 ::unregisterLocalMemory(engine_, old_pair->base_buffer);
-                if (old_pair->is_gpu) {
+                if (old_pair->is_cuda) {
 #ifdef USE_CUDA
                     cudaFree(old_pair->base_buffer);
 #endif
@@ -288,7 +288,7 @@ int FlexTransferEngine::registerLocalMemoryBatch(
                 // Free old buffer pair
                 BufferPair *old_pair = it->second;
                 ::unregisterLocalMemory(engine_, old_pair->base_buffer);
-                if (old_pair->is_gpu) {
+                if (old_pair->is_cuda) {
 #ifdef USE_CUDA
                     cudaFree(old_pair->base_buffer);
 #endif
@@ -654,7 +654,7 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
             (i % 2 == 0) ? buffer_pair->buffer1 : buffer_pair->buffer2;
 
         // Copy data from source to buffer
-        int ret = copyMemory(buffer, source_addr, length, buffer_pair->is_gpu);
+        int ret = copyMemory(buffer, source_addr, length, buffer_pair->is_cuda);
         if (ret < 0) {
             std::cerr << "Failed to copy memory from " << source_addr
                       << " to buffer " << buffer << std::endl;
@@ -785,7 +785,7 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::getOrAllocateBufferPair(
         // Free old buffer pair
         BufferPair *old_pair = it->second;
         ::unregisterLocalMemory(engine_, old_pair->base_buffer);
-        if (old_pair->is_gpu) {
+        if (old_pair->is_cuda) {
 #ifdef USE_CUDA
             cudaFree(old_pair->base_buffer);
 #endif
@@ -806,13 +806,13 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::allocateBufferPair(
     const std::string &location, size_t size) {
     FlexTransferEngine::BufferPair *pair = new FlexTransferEngine::BufferPair();
     pair->size = size;
-    pair->is_gpu = (location.find("cuda") == 0);
+    pair->is_cuda = (location.find("cuda:") == 0);
     pair->buffer1_in_use = false;
     pair->buffer2_in_use = false;
 
     // Allocate one contiguous buffer that's 2*size
     size_t total_size = 2 * size;
-    if (pair->is_gpu) {
+    if (pair->is_cuda) {
 #ifdef USE_CUDA
         cudaError_t err = cudaMalloc(&pair->base_buffer, total_size);
         if (err != cudaSuccess) {
@@ -847,7 +847,7 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::allocateBufferPair(
                                      location.c_str(), 1);
     if (ret < 0) {
         std::cerr << "Failed to register buffer with RDMA" << std::endl;
-        if (pair->is_gpu) {
+        if (pair->is_cuda) {
 #ifdef USE_CUDA
             cudaFree(pair->base_buffer);
 #endif
@@ -864,8 +864,8 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::allocateBufferPair(
 }
 
 int FlexTransferEngine::copyMemory(void *dst, const void *src, size_t size,
-                                    bool is_gpu) {
-    if (is_gpu) {
+                                    bool is_cuda) {
+    if (is_cuda) {
 #ifdef USE_CUDA
         cudaError_t err = cudaMemcpy(dst, src, size, cudaMemcpyDefault);
         if (err != cudaSuccess) {

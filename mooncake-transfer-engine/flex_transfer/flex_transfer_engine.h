@@ -205,10 +205,11 @@ class FlexTransferEngine {
 
     void handleAndProcessRequest(int client_fd);
 
-    BufferPair *getOrAllocateBufferPair(const std::string &location,
+    BufferPair *getOrAllocBufferPair(const std::string &location,
                                         size_t size);
 
-    BufferPair *allocateBufferPair(const std::string &location, size_t size);
+    BufferPair *allocBufferPair(const std::string &location, size_t size);
+    void freeBufferPair(BufferPair *pair);
 
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 

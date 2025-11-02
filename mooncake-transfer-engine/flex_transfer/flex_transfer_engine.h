@@ -56,21 +56,20 @@ class FlexBatch {
 
     ~FlexBatch();
 
-    /**
-     * Add a transfer request to this batch.
-     * @param req The transfer request to add
-     */
-    void addReq(const transfer_request_t &req);
+    void addReadRequest(uintptr_t local_addr, uintptr_t remote_addr,
+                        uint64_t size);
+    void addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
+                         uint64_t size);
 
     /**
      * Submit the transfer batch.
      *
-     * @param copy_server_url Optional server URL for copy-based transfer in
-     * format "ip_addr:port" (supports both IPv4 and IPv6). If provided,
-     * transfer will use copy-based approach via TCP. If empty, uses direct
-     * RDMA.
+     * @param target Remote target, either Mooncake segment name or copy server
+     * URL (formatted as "ip:port").
+     * @param is_target_copy If true, target is a copy server URL; if false,
+     * target is a segment name.
      */
-    int submit(const std::string &copy_server_url = "");
+    int submit(const std::string &target, bool is_target_copy = false);
 
     /**
      * Get the status of a transfer task.
@@ -128,14 +127,9 @@ class FlexTransferEngine {
              const std::string &local_server_name, bool auto_discover = true);
 
     /**
-     * Open a segment by name.
+     * Get a segment ID by name (will open the segment if not cached).
      */
-    segment_id_t openSegment(const std::string &segment_name);
-
-    /**
-     * Close a segment.
-     */
-    int closeSegment(segment_id_t segment_id);
+    segment_id_t getSegmentId(const std::string &segment_name);
 
     /**
      * Register local memory with the transfer engine.
@@ -204,74 +198,33 @@ class FlexTransferEngine {
         bool buffer1_in_use;
     };
 
-    /**
-     * Start the TCP listener thread (only if enable_copy is true).
-     * Automatically determines local IP and finds an available port.
-     */
-    int startListener();
-
-    /**
-     * Stop the TCP listener thread.
-     */
-    void stopListener();
-
-    /**
-     * Worker thread that listens and processes requests.
-     */
     void workerThread();
 
-    /**
-     * Handle and process a transfer request from a client.
-     */
+    int startListener();
+    void stopListener();
+
     void handleAndProcessRequest(int client_fd);
 
-    /**
-     * Get or allocate a buffer pair for the given location and size.
-     */
     BufferPair *getOrAllocateBufferPair(const std::string &location,
                                         size_t size);
 
-    /**
-     * Allocate and register a new buffer pair.
-     */
     BufferPair *allocateBufferPair(const std::string &location, size_t size);
 
-    /**
-     * Copy data from source to destination (handles both CPU and GPU memory).
-     */
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
-    /**
-     * Check if an address is registered.
-     */
     bool isAddressRegistered(void *addr);
 
-    /**
-     * Get location for an address (returns empty string if not found).
-     */
     std::string getLocation(void *addr);
 
-    /**
-     * Connect to a remote FlexTransferEngine via TCP.
-     */
     int connectToCopyEngine(const std::string &server_url);
 
-    /**
-     * Send batch info to remote FlexTransferEngine and initiate transfer.
-     */
     int submitTransferToCopyEngine(batch_id_t batch_id,
                                    std::vector<transfer_request_t> &entries,
                                    const std::string &server_url,
                                    CopyCtrlBlock *ctrl_block);
 
-    /**
-     * Acquire a CopyCtrlBlock from the cache (or allocate a new one).
-     */
     CopyCtrlBlock *acquireCopyCtrlBlock();
 
-    /**
-     * Release a CopyCtrlBlock back to the cache.
-     */
     void releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block);
 
     transfer_engine_t engine_;

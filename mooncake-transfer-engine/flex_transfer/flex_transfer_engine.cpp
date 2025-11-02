@@ -51,11 +51,26 @@ FlexBatch::~FlexBatch() {
     }
 }
 
-void FlexBatch::addReq(const transfer_request_t &req) {
-    entries_.emplace_back(req);
+void FlexBatch::addReadRequest(uintptr_t local_addr, uintptr_t remote_addr,
+                               uint64_t size) {
+    entries_.emplace_back(
+        transfer_request_t{.opcode = OPCODE_READ,
+                           .source = reinterpret_cast<void *>(local_addr),
+                           .target_id = -1,  // will be set upon submit()
+                           .target_offset = remote_addr,
+                           .length = size});
+}
+void FlexBatch::addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
+                                uint64_t size) {
+    entries_.emplace_back(
+        transfer_request_t{.opcode = OPCODE_WRITE,
+                           .source = reinterpret_cast<void *>(local_addr),
+                           .target_id = -1,  // will be set upon submit()
+                           .target_offset = remote_addr,
+                           .length = size});
 }
 
-int FlexBatch::submit(const std::string &copy_server_url) {
+int FlexBatch::submit(const std::string &target, bool is_target_copy) {
     if (entries_.empty()) {
         std::cerr << "Error: No transfer requests in batch" << std::endl;
         return -1;
@@ -68,8 +83,9 @@ int FlexBatch::submit(const std::string &copy_server_url) {
         return -1;
     }
 
-    if (copy_server_url.empty()) {
-        // Direct RDMA transfer through underlying TransferEngine
+    if (!is_target_copy) {  // Then target is a segment name for direct RDMA
+        auto target_segment_id = engine_->getSegmentId(target);
+        for (auto &entry : entries_) entry.target_id = target_segment_id;
         return ::submitTransfer(engine_->getEngine(), batch_id_,
                                 entries_.data(), entries_.size());
     }
@@ -82,8 +98,8 @@ int FlexBatch::submit(const std::string &copy_server_url) {
     }
 
     // Submit to remote FlexTransferEngine
-    return engine_->submitTransferToCopyEngine(batch_id_, entries_,
-                                               copy_server_url, ctrl_block_);
+    return engine_->submitTransferToCopyEngine(batch_id_, entries_, target,
+                                               ctrl_block_);
 }
 
 int FlexBatch::getTransferStatus(size_t task_id, transfer_status_t &status) {
@@ -195,14 +211,6 @@ int FlexTransferEngine::init(const std::string &metadata_conn_string,
     }
 
     return 0;
-}
-
-segment_id_t FlexTransferEngine::openSegment(const std::string &segment_name) {
-    return ::openSegment(engine_, segment_name.c_str());
-}
-
-int FlexTransferEngine::closeSegment(segment_id_t segment_id) {
-    return ::closeSegment(engine_, segment_id);
 }
 
 int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
@@ -501,24 +509,11 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
     std::cerr << "Received request for segment: " << segment_name << std::endl;
 
     // Get or open segment
-    segment_id_t target_segment_id;
-    {
-        std::lock_guard<std::mutex> lock(segment_cache_mutex_);
-        auto it = segment_cache_.find(segment_name);
-        if (it != segment_cache_.end()) {
-            target_segment_id = it->second;
-        } else {
-            target_segment_id = ::openSegment(engine_, segment_name.c_str());
-            if (target_segment_id < 0) {
-                std::cerr << "Failed to open segment: " << segment_name
-                          << std::endl;
-                close(client_fd);
-                return;
-            }
-            segment_cache_[segment_name] = target_segment_id;
-            std::cerr << "Opened and cached segment: " << segment_name
-                      << " (id=" << target_segment_id << ")" << std::endl;
-        }
+    segment_id_t target_segment_id = getSegmentId(segment_name);
+    if (target_segment_id < 0) {
+        std::cerr << "Failed to open segment: " << segment_name << std::endl;
+        close(client_fd);
+        return;
     }
 
     // Read batch info
@@ -752,6 +747,20 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
 
     close(client_fd);
     std::cerr << "Completed transfer request" << std::endl;
+}
+
+segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {
+    std::lock_guard<std::mutex> lock(segment_cache_mutex_);
+    auto it = segment_cache_.find(segment_name);
+    if (it != segment_cache_.end()) return it->second;
+
+    segment_id_t segment_id = ::openSegment(engine_, segment_name.c_str());
+    if (segment_id < 0) {
+        std::cerr << "Failed to open segment: " << segment_name << std::endl;
+        return -1;
+    }
+    segment_cache_[segment_name] = segment_id;
+    return segment_id;
 }
 
 FlexTransferEngine::BufferPair *FlexTransferEngine::getOrAllocateBufferPair(

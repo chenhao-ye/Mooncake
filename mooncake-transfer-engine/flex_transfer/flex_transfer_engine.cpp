@@ -76,14 +76,12 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy) {
         return -1;
     }
 
-    // Allocate batch ID based on number of entries
-    batch_id_ = ::allocateBatchID(engine_->getEngine(), entries_.size());
-    if (batch_id_ == INVALID_BATCH) {
-        std::cerr << "Failed to allocate batch ID" << std::endl;
-        return -1;
-    }
-
     if (!is_target_copy) {  // Then target is a segment name for direct RDMA
+        batch_id_ = ::allocateBatchID(engine_->getEngine(), entries_.size());
+        if (batch_id_ == INVALID_BATCH) {
+            std::cerr << "Failed to allocate batch ID" << std::endl;
+            return -1;
+        }
         auto target_segment_id = engine_->getSegmentId(target);
         for (auto &entry : entries_) entry.target_id = target_segment_id;
         return ::submitTransfer(engine_->getEngine(), batch_id_,
@@ -92,27 +90,24 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy) {
 
     // Copy-based transfer - acquire a CopyCtrlBlock
     ctrl_block_ = engine_->acquireCopyCtrlBlock();
-    if (ctrl_block_ == nullptr) {
+    if (!ctrl_block_) {
         std::cerr << "Failed to acquire CopyCtrlBlock" << std::endl;
         return -1;
     }
 
     // Submit to remote FlexTransferEngine
-    return engine_->submitTransferToCopyEngine(batch_id_, entries_, target,
-                                               ctrl_block_);
+    return engine_->submitTransferToCopyEngine(entries_, target, ctrl_block_);
 }
 
 int FlexBatch::getTransferStatus(size_t task_id, transfer_status_t &status) {
-    if (!ctrl_block_) {
-        // For direct transfers or force_direct, query underlying engine
+    if (!ctrl_block_) {  // Direct RDMA transfer
         return ::getTransferStatus(engine_->getEngine(), batch_id_, task_id,
                                    &status);
     }
 
     // For copy-based transfers, check ctrl_block progress
     int64_t progress = ctrl_block_->progress_counter;
-    if (static_cast<int64_t>(task_id) < progress) {
-        // Task completed
+    if (static_cast<int64_t>(task_id) < progress) {  // Task completed
         status.status = STATUS_COMPLETED;
         status.transferred_bytes = entries_[task_id].length;
         return 0;
@@ -265,7 +260,7 @@ int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
 
         // Allocate a new buffer pair
         BufferPair *new_pair = allocateBufferPair(location, max_size);
-        if (new_pair == nullptr) {
+        if (!new_pair) {
             std::cerr << "Failed to allocate buffer pair for location "
                       << location << std::endl;
             copiable_regions_.erase(addr);
@@ -342,7 +337,7 @@ int FlexTransferEngine::registerLocalMemoryBatch(
 
         // Allocate a new buffer pair
         BufferPair *new_pair = allocateBufferPair(location, max_size);
-        if (new_pair == nullptr) {
+        if (!new_pair) {
             std::cerr << "Failed to allocate buffer pair for location "
                       << location << std::endl;
             return -1;
@@ -602,7 +597,7 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
 
         // Get a buffer pair for this location
         BufferPair *buffer_pair = getOrAllocateBufferPair(location, length);
-        if (buffer_pair == nullptr) {
+        if (!buffer_pair) {
             std::cerr << "Failed to get buffer pair for location " << location
                       << std::endl;
             // Write -1 to progress address to indicate error
@@ -788,9 +783,8 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::getOrAllocateBufferPair(
     }
 
     BufferPair *new_pair = allocateBufferPair(location, size);
-    if (new_pair != nullptr) {
-        buffer_pool_[location] = new_pair;
-    }
+    if (new_pair) buffer_pool_[location] = new_pair;
+
     return new_pair;
 }
 
@@ -823,7 +817,7 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::allocateBufferPair(
 #endif
     } else {
         pair->buffer0 = new char[total_size];
-        if (pair->buffer0 == nullptr) {
+        if (!pair->buffer0) {
             std::cerr << "Failed to allocate CPU memory" << std::endl;
             delete pair;
             return nullptr;
@@ -935,10 +929,7 @@ CopyCtrlBlock *FlexTransferEngine::acquireCopyCtrlBlock() {
 }
 
 void FlexTransferEngine::releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block) {
-    if (ctrl_block == nullptr) {
-        return;
-    }
-
+    if (!ctrl_block) return;
     std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
     copy_ctrl_block_cache_.push_back(ctrl_block);
 }
@@ -1003,14 +994,8 @@ int FlexTransferEngine::connectToCopyEngine(const std::string &server_url) {
     int fd = -1;
     for (struct addrinfo *rp = result; rp != nullptr; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (fd < 0) {
-            continue;
-        }
-
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
-            break;  // Success
-        }
-
+        if (fd < 0) continue;
+        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;  // Success
         close(fd);
         fd = -1;
     }
@@ -1028,8 +1013,8 @@ int FlexTransferEngine::connectToCopyEngine(const std::string &server_url) {
 }
 
 int FlexTransferEngine::submitTransferToCopyEngine(
-    batch_id_t batch_id, std::vector<transfer_request_t> &entries,
-    const std::string &server_url, CopyCtrlBlock *ctrl_block) {
+    std::vector<transfer_request_t> &entries, const std::string &server_url,
+    CopyCtrlBlock *ctrl_block) {
     // Verify all entries are read requests
     for (const auto &entry : entries) {
         if (entry.opcode != OPCODE_READ) {
@@ -1042,7 +1027,7 @@ int FlexTransferEngine::submitTransferToCopyEngine(
 
     if (entries.empty()) return 0;
 
-    if (ctrl_block == nullptr) {
+    if (!ctrl_block) {
         std::cerr << "Error: ctrl_block is nullptr for copy-based transfer"
                   << std::endl;
         return -1;

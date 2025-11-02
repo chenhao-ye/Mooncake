@@ -218,8 +218,7 @@ class FlexTransferEngine {
 
     int connectToCopyEngine(const std::string &server_url);
 
-    int submitTransferToCopyEngine(batch_id_t batch_id,
-                                   std::vector<transfer_request_t> &entries,
+    int submitTransferToCopyEngine(std::vector<transfer_request_t> &entries,
                                    const std::string &server_url,
                                    CopyCtrlBlock *ctrl_block);
 

@@ -173,43 +173,35 @@ int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
     }
     // else: register for copy-based transfer
 
+    // first ensure we have a (large-enough) buffer pair for this location
+    {
+        std::lock_guard<std::mutex> pool_lock(pool_mutex_);
+
+        // Check if we have a buffer pair for this location
+        auto it = buffer_pool_.find(location);
+        if (it == buffer_pool_.end() || it->second->size < length) {
+            if (it != buffer_pool_.end()) freeBufferPair(it->second);
+
+            BufferPair *new_pair = allocBufferPair(location, length);
+            if (!new_pair) return -1;
+            buffer_pool_[location] = new_pair;
+            std::cerr << "Allocated buffer pair of size " << length
+                      << " for location " << location << std::endl;
+        }
+    }
+
+    /**
+     * Note here we don't track the overlapped regions: if the same region is
+     * registered multiple times, only the last one is kept.
+     * If there are duplicated unregistrations, only the first one will succeed.
+     * Other unregistrations will return -1 (not found).
+     */
     {
         std::lock_guard<std::mutex> regions_lock(regions_mutex_);
         copiable_regions_[addr] = {addr, length, location};
         std::cerr << "Registered memory at " << addr << " size " << length
                   << " location " << location << std::endl;
     }
-
-    {
-        std::lock_guard<std::mutex> pool_lock(pool_mutex_);
-
-        // Find the largest memory region for this location
-        size_t max_size = length;
-        for (const auto &[_, reg] : copiable_regions_) {
-            if (reg.location == location && reg.length > max_size)
-                max_size = reg.length;
-        }
-
-        // Check if we have a buffer pair for this location
-        auto it = buffer_pool_.find(location);
-        if (it == buffer_pool_.end() || it->second->size < max_size) {
-            // Need to allocate or resize buffer pair
-            if (it != buffer_pool_.end()) freeBufferPair(it->second);
-
-            // Allocate a new buffer pair
-            BufferPair *new_pair = allocBufferPair(location, max_size);
-            if (!new_pair) {
-                std::cerr << "Failed to allocate buffer pair for location "
-                          << location << std::endl;
-                copiable_regions_.erase(addr);
-                return -1;
-            }
-            buffer_pool_[location] = new_pair;
-            std::cerr << "Allocated buffer pair of size " << max_size
-                      << " for location " << location << std::endl;
-        }
-    }
-
     return 0;
 }
 
@@ -219,11 +211,8 @@ int FlexTransferEngine::unregisterLocalMemory(void *addr, bool force_direct) {
         return ::unregisterLocalMemory(engine_, addr);
 
     std::lock_guard<std::mutex> lock(regions_mutex_);
-
-    auto it = copiable_regions_.find(addr);
-    if (it == copiable_regions_.end()) return -1;  // Not found
-    copiable_regions_.erase(it);
-    return 0;
+    size_t num_erased = copiable_regions_.erase(addr);
+    return num_erased > 0 ? 0 : -1;
 }
 
 int FlexTransferEngine::registerLocalMemoryBatch(
@@ -255,16 +244,9 @@ int FlexTransferEngine::registerLocalMemoryBatch(
         // Check if we have a buffer pair for this location
         auto it = buffer_pool_.find(location);
         if (it == buffer_pool_.end() || it->second->size < max_size) {
-            // Need to allocate or resize buffer pair
             if (it != buffer_pool_.end()) freeBufferPair(it->second);
-
-            // Allocate a new buffer pair
             BufferPair *new_pair = allocBufferPair(location, max_size);
-            if (!new_pair) {
-                std::cerr << "Failed to allocate buffer pair for location "
-                          << location << std::endl;
-                return -1;
-            }
+            if (!new_pair) goto err;
             buffer_pool_[location] = new_pair;
             std::cerr << "Allocated buffer pair of size " << max_size
                       << " for location " << location << std::endl;
@@ -272,6 +254,14 @@ int FlexTransferEngine::registerLocalMemoryBatch(
     }
 
     return 0;
+
+err :
+
+{
+    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+    for (const auto &entry : buffer_list) copiable_regions_.erase(entry.addr);
+}
+    return -1;
 }
 
 int FlexTransferEngine::unregisterLocalMemoryBatch(
@@ -282,18 +272,23 @@ int FlexTransferEngine::unregisterLocalMemoryBatch(
                                             addr_list.size());
     }
 
-    // Remove from tracked copiable regions
+    /**
+     * If the same memory region is registered multiple times, only the last one
+     * will be preserved. In that case, if calling unregister on the same number
+     * of times, only the first one will succeed, the rest will be considered as
+     * an error. However, in a batch mode, we prefer to tolerate this error:
+     * other memory regions are unaffected (will continue the unregisteration),
+     * and only return -1 to indicate that at least one region failed.
+     */
     int ret = 0;
-    {
-        std::lock_guard<std::mutex> lock(regions_mutex_);
 
-        for (void *addr : addr_list) {
-            auto it = copiable_regions_.find(addr);
-            if (it != copiable_regions_.end()) {
-                copiable_regions_.erase(it);
-            } else {
-                ret = -1;  // Not found, but will continue
-            }
+    std::lock_guard<std::mutex> lock(regions_mutex_);
+    for (void *addr : addr_list) {
+        auto it = copiable_regions_.find(addr);
+        if (it != copiable_regions_.end()) {
+            copiable_regions_.erase(it);
+        } else {
+            ret = -1;  // Not found, but will continue
         }
     }
 
@@ -323,10 +318,6 @@ int FlexTransferEngine::startListener() {
         return -1;
     }
 
-    // Start worker thread
-    worker_running_ = true;
-    worker_thread_ = std::thread(&FlexTransferEngine::workerThread, this);
-
     // Determine the IP address to use for the server URL
     auto ip_list = findLocalIpAddresses();
     if (ip_list.empty() || ip_list[0].empty()) {
@@ -348,6 +339,10 @@ int FlexTransferEngine::startListener() {
 
     std::cerr << "TCP listener started on " << local_copy_server_url_
               << std::endl;
+
+    // finally, start worker thread
+    worker_running_ = true;
+    worker_thread_ = std::thread(&FlexTransferEngine::workerThread, this);
     return 0;
 }
 
@@ -377,10 +372,8 @@ void FlexTransferEngine::workerThread() {
         int client_fd =
             accept(listener_fd_, (struct sockaddr *)&client_addr, &client_len);
         if (client_fd < 0) {
-            if (worker_running_.load(std::memory_order_acquire)) {
-                std::cerr << "Failed to accept connection: " << strerror(errno)
-                          << std::endl;
-            }
+            std::cerr << "Failed to accept connection: " << strerror(errno)
+                      << std::endl;
             continue;
         }
 
@@ -391,6 +384,7 @@ void FlexTransferEngine::workerThread() {
 
         // Handle and process the request directly
         handleAndProcessRequest(client_fd);
+        close(client_fd);
     }
 
     std::cerr << "Worker thread stopped" << std::endl;
@@ -402,7 +396,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
     if (readFully(client_fd, &segment_name_len, sizeof(segment_name_len)) !=
         sizeof(segment_name_len)) {
         std::cerr << "Failed to read segment name length" << std::endl;
-        close(client_fd);
         return;
     }
 
@@ -410,16 +403,14 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
     if (segment_name_len == 0 || segment_name_len > kMaxLength) {
         std::cerr << "Invalid segment name length: " << segment_name_len
                   << std::endl;
-        close(client_fd);
         return;
     }
 
     // Read segment name
-    std::string segment_name(segment_name_len, '\0');
-    if (readFully(client_fd, &segment_name[0], segment_name_len) !=
+    std::string segment_name(segment_name_len + 1, '\0');
+    if (readFully(client_fd, segment_name.data(), segment_name_len) !=
         segment_name_len) {
         std::cerr << "Failed to read segment name" << std::endl;
-        close(client_fd);
         return;
     }
 
@@ -429,7 +420,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
     segment_id_t target_segment_id = getSegmentId(segment_name);
     if (target_segment_id < 0) {
         std::cerr << "Failed to open segment: " << segment_name << std::endl;
-        close(client_fd);
         return;
     }
 
@@ -443,7 +433,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
     if (readFully(client_fd, &batch_info, sizeof(batch_info)) !=
         sizeof(batch_info)) {
         std::cerr << "Failed to read batch info" << std::endl;
-        close(client_fd);
         return;
     }
 
@@ -472,7 +461,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         if (readFully(client_fd, &req_info, sizeof(req_info)) !=
             sizeof(req_info)) {
             std::cerr << "Failed to read request info" << std::endl;
-            close(client_fd);
             return;
         }
 
@@ -489,24 +477,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         if (!isAddressRegistered(addr)) {
             std::cerr << "Error: Address " << addr << " is not registered"
                       << std::endl;
-            // Write -1 to progress address to indicate error
-            int64_t error_val = -1;
-            batch_id_t batch_id = ::allocateBatchID(engine_, 1);
-            transfer_request_t error_req;
-            error_req.opcode = OPCODE_READ;
-            error_req.source = &error_val;
-            error_req.target_id = LOCAL_SEGMENT;
-            error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
-            error_req.length = sizeof(int64_t);
-            ::submitTransfer(engine_, batch_id, &error_req, 1);
-            // Wait for completion
-            transfer_status_t status;
-            while (::getTransferStatus(engine_, batch_id, 0, &status) == 0 &&
-                   status.status != STATUS_COMPLETED) {
-                usleep(1000);
-            }
-            ::freeBatchID(engine_, batch_id);
-            close(client_fd);
             return;
         }
     }
@@ -522,23 +492,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         if (!buffer_pair) {
             std::cerr << "Failed to get buffer pair for location " << location
                       << std::endl;
-            // Write -1 to progress address to indicate error
-            int64_t error_val = -1;
-            batch_id_t batch_id = ::allocateBatchID(engine_, 1);
-            transfer_request_t error_req;
-            error_req.opcode = OPCODE_WRITE;
-            error_req.source = &error_val;
-            error_req.target_id = LOCAL_SEGMENT;
-            error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
-            error_req.length = sizeof(int64_t);
-            ::submitTransfer(engine_, batch_id, &error_req, 1);
-            transfer_status_t status;
-            while (::getTransferStatus(engine_, batch_id, 0, &status) == 0 &&
-                   status.status != STATUS_COMPLETED) {
-                usleep(1000);
-            }
-            ::freeBatchID(engine_, batch_id);
-            close(client_fd);
             return;
         }
 
@@ -551,23 +504,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         if (ret < 0) {
             std::cerr << "Failed to copy memory from " << source_addr
                       << " to buffer " << buffer << std::endl;
-            // Write -1 to progress address to indicate error
-            int64_t error_val = -1;
-            batch_id_t batch_id = ::allocateBatchID(engine_, 1);
-            transfer_request_t error_req;
-            error_req.opcode = OPCODE_WRITE;
-            error_req.source = &error_val;
-            error_req.target_id = LOCAL_SEGMENT;
-            error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
-            error_req.length = sizeof(int64_t);
-            ::submitTransfer(engine_, batch_id, &error_req, 1);
-            transfer_status_t status;
-            while (::getTransferStatus(engine_, batch_id, 0, &status) == 0 &&
-                   status.status != STATUS_COMPLETED) {
-                usleep(1000);
-            }
-            ::freeBatchID(engine_, batch_id);
-            close(client_fd);
             return;
         }
 
@@ -585,23 +521,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         if (submit_ret < 0) {
             std::cerr << "Failed to submit RDMA write" << std::endl;
             ::freeBatchID(engine_, write_batch_id);
-            // Write -1 to progress address to indicate error
-            int64_t error_val = -1;
-            batch_id_t error_batch = ::allocateBatchID(engine_, 1);
-            transfer_request_t error_req;
-            error_req.opcode = OPCODE_WRITE;
-            error_req.source = &error_val;
-            error_req.target_id = LOCAL_SEGMENT;
-            error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
-            error_req.length = sizeof(int64_t);
-            ::submitTransfer(engine_, error_batch, &error_req, 1);
-            transfer_status_t status;
-            while (::getTransferStatus(engine_, error_batch, 0, &status) == 0 &&
-                   status.status != STATUS_COMPLETED) {
-                usleep(1000);
-            }
-            ::freeBatchID(engine_, error_batch);
-            close(client_fd);
             return;
         }
 
@@ -617,23 +536,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         if (write_status.status != STATUS_COMPLETED) {
             std::cerr << "RDMA write failed with status " << write_status.status
                       << std::endl;
-            // Write -1 to progress address to indicate error
-            int64_t error_val = -1;
-            batch_id_t error_batch = ::allocateBatchID(engine_, 1);
-            transfer_request_t error_req;
-            error_req.opcode = OPCODE_WRITE;
-            error_req.source = &error_val;
-            error_req.target_id = LOCAL_SEGMENT;
-            error_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
-            error_req.length = sizeof(int64_t);
-            ::submitTransfer(engine_, error_batch, &error_req, 1);
-            transfer_status_t status;
-            while (::getTransferStatus(engine_, error_batch, 0, &status) == 0 &&
-                   status.status != STATUS_COMPLETED) {
-                usleep(1000);
-            }
-            ::freeBatchID(engine_, error_batch);
-            close(client_fd);
             return;
         }
 
@@ -662,7 +564,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
     }
     ::freeBatchID(engine_, batch_id);
 
-    close(client_fd);
     std::cerr << "Completed transfer request" << std::endl;
 }
 

@@ -38,9 +38,9 @@ namespace mooncake {
 FlexBatch::~FlexBatch() {
     if (engine_) {
         // Return the CopyCtrlBlock to the cache if it exists
-        if (ctrl_block_) {
-            engine_->releaseCopyCtrlBlock(ctrl_block_);
-            ctrl_block_ = nullptr;
+        if (copy_ctrl_block_) {
+            engine_->releaseCopyCtrlBlock(copy_ctrl_block_);
+            copy_ctrl_block_ = nullptr;
         }
 
         // Free the batch ID if it was allocated
@@ -89,24 +89,25 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy) {
     }
 
     // Copy-based transfer - acquire a CopyCtrlBlock
-    ctrl_block_ = engine_->acquireCopyCtrlBlock();
-    if (!ctrl_block_) {
+    copy_ctrl_block_ = engine_->acquireCopyCtrlBlock();
+    if (!copy_ctrl_block_) {
         std::cerr << "Failed to acquire CopyCtrlBlock" << std::endl;
         return -1;
     }
 
     // Submit to remote FlexTransferEngine
-    return engine_->submitTransferToCopyEngine(entries_, target, ctrl_block_);
+    return engine_->submitTransferToCopyEngine(entries_, target,
+                                               copy_ctrl_block_);
 }
 
 int FlexBatch::getTransferStatus(size_t task_id, transfer_status_t &status) {
-    if (!ctrl_block_) {  // Direct RDMA transfer
+    if (!copy_ctrl_block_) {  // Direct RDMA transfer
         return ::getTransferStatus(engine_->getEngine(), batch_id_, task_id,
                                    &status);
     }
 
     // For copy-based transfers, check ctrl_block progress
-    int64_t progress = ctrl_block_->progress_counter;
+    int64_t progress = copy_ctrl_block_->progress_counter;
     if (static_cast<int64_t>(task_id) < progress) {  // Task completed
         status.status = STATUS_COMPLETED;
         status.transferred_bytes = entries_[task_id].length;

@@ -52,7 +52,7 @@ class FlexBatch {
     explicit FlexBatch(std::shared_ptr<FlexTransferEngine> engine)
         : engine_(std::move(engine)),
           batch_id_(INVALID_BATCH),
-          ctrl_block_(nullptr) {}
+          copy_ctrl_block_(nullptr) {}
 
     ~FlexBatch();
 
@@ -81,7 +81,7 @@ class FlexBatch {
    private:
     std::shared_ptr<FlexTransferEngine> engine_;
     batch_id_t batch_id_;
-    CopyCtrlBlock *ctrl_block_;
+    CopyCtrlBlock *copy_ctrl_block_;
     std::vector<transfer_request_t> entries_;
 };
 

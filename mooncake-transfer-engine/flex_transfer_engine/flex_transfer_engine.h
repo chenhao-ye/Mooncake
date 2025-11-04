@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -117,10 +118,12 @@ class FlexTransferEngine {
                                    CopyCtrlBlock *ctrl_block);
 
    private:
+    using LocID = int32_t; // <0 for invalid location
+
     struct MemoryRegion {
         void *addr;
         size_t length;
-        std::string location;
+        LocID loc_id;
     };
 
     struct BufferPair {
@@ -139,15 +142,18 @@ class FlexTransferEngine {
 
     void handleAndProcessRequest(int client_fd);
 
-    BufferPair *getOrAllocBufferPair(const std::string &location, size_t size);
+    // Require regions_mutex_ to be held before calling
+    LocID acquireLocID(const std::string &location);
 
-    BufferPair *allocBufferPair(const std::string &location, size_t size);
+    BufferPair *getOrAllocBufferPair(LocID loc_id, size_t size);
+
+    BufferPair *allocBufferPair(LocID loc_id, size_t size);
     void freeBufferPair(BufferPair *pair);
 
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
     // Require regions_mutex_ to be held before calling
-    MemoryRegion* getRegion(void *addr, size_t length);
+    MemoryRegion *getRegion(void *addr, size_t length);
 
     int connectToCopyEngine(const std::string &server_url);
 
@@ -164,11 +170,16 @@ class FlexTransferEngine {
     // only tracked for copy-based transfers.
     // When enable_copy_ is false, these ARE RDMA-registered.
     std::unordered_map<void *, MemoryRegion> copiable_regions_;
+
+    // Location string storage (LocID -> location string)
+    // Protected by regions_mutex_
+    std::vector<std::string> location_strings_;
+
     std::mutex regions_mutex_;
 
-    // Buffer pool per location (location -> buffer pair)
+    // Buffer pool per location (LocID -> buffer pair)
     // Only used when enable_copy is true
-    std::unordered_map<std::string, BufferPair *> buffer_pool_;
+    std::unordered_map<LocID, BufferPair *> buffer_pool_;
     std::mutex pool_mutex_;
 
     // Segment cache (segment_name -> segment_id)

@@ -22,7 +22,7 @@ FlexTransferEngine::~FlexTransferEngine() {
         stopListener();
 
         std::lock_guard<std::mutex> lock(regions_mutex_);
-        for (auto &[location, pair] : buffer_pool_) freeBufferPair(pair);
+        for (auto pair : buffer_pool_) freeBufferPair(pair);
         buffer_pool_.clear();
     }
 
@@ -101,21 +101,19 @@ int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
      */
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
 
-    LocID loc_id = acquireLocID(location);
-    copiable_regions_[addr] = {addr, length, loc_id};
+    LocIdx loc_idx = getLocIdx(location);
+    copiable_regions_[addr] = {addr, length, loc_idx};
 
     std::cerr << "Registered memory at " << addr << " size " << length
               << " location " << location << std::endl;
 
-    // first ensure we have a (large-enough) buffer pair for this location
     // Check if we have a buffer pair for this location
-    auto it = buffer_pool_.find(loc_id);
-    if (it == buffer_pool_.end() || it->second->size < length) {
-        if (it != buffer_pool_.end()) freeBufferPair(it->second);
-
-        BufferPair *new_pair = allocBufferPair(loc_id, location, length);
-        if (!new_pair) goto err;
-        buffer_pool_[loc_id] = new_pair;
+    BufferPair *pair = buffer_pool_[loc_idx];
+    if (!pair || pair->size < length) {
+        if (pair) freeBufferPair(pair);
+        pair = allocBufferPair(loc_idx, location, length);
+        buffer_pool_[loc_idx] = pair;
+        if (!pair) goto err;
         std::cerr << "Allocated buffer pair of size " << length
                   << " for location " << location << std::endl;
     }
@@ -148,23 +146,23 @@ int FlexTransferEngine::registerLocalMemoryBatch(
     }
 
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
-    LocID loc_id = acquireLocID(location);
+    LocIdx loc_idx = getLocIdx(location);
     size_t max_size = 0;
 
     for (const auto &entry : buffer_list) {
         if (entry.length > max_size) max_size = entry.length;
-        copiable_regions_[entry.addr] = {entry.addr, entry.length, loc_id};
+        copiable_regions_[entry.addr] = {entry.addr, entry.length, loc_idx};
     }
     std::cerr << "Registered " << buffer_list.size() << " buffers for location "
               << location << ", max size " << max_size << std::endl;
 
     // Check if we have a buffer pair for this location
-    auto it = buffer_pool_.find(loc_id);
-    if (it == buffer_pool_.end() || it->second->size < max_size) {
-        if (it != buffer_pool_.end()) freeBufferPair(it->second);
-        BufferPair *new_pair = allocBufferPair(loc_id, location, max_size);
-        if (!new_pair) goto err;
-        buffer_pool_[loc_id] = new_pair;
+    BufferPair *pair = buffer_pool_[loc_idx];
+    if (!pair || pair->size < max_size) {
+        if (pair) freeBufferPair(pair);
+        pair = allocBufferPair(loc_idx, location, max_size);
+        buffer_pool_[loc_idx] = pair;
+        if (!pair) goto err;
         std::cerr << "Allocated buffer pair of size " << max_size
                   << " for location " << location << std::endl;
     }
@@ -544,10 +542,10 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         }
 
         // Get a buffer pair for this location
-        BufferPair *buffer_pair = getOrAllocBufferPair(region->loc_id, length);
+        BufferPair *buffer_pair = getBufferPair(region->loc_idx, length);
         if (!buffer_pair) {
             std::cerr << "Failed to get buffer pair for location "
-                      << location_strings_[region->loc_id] << std::endl;
+                      << location_strings_[region->loc_idx] << std::endl;
             return;
         }
 
@@ -638,30 +636,25 @@ segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {
 }
 
 // Require regions_mutex_ to be held before calling
-FlexTransferEngine::BufferPair *FlexTransferEngine::getOrAllocBufferPair(
-    LocID loc_id, size_t size) {
-    auto it = buffer_pool_.find(loc_id);
-    if (it != buffer_pool_.end() && it->second->size >= size) return it->second;
+FlexTransferEngine::BufferPair *FlexTransferEngine::getBufferPair(
+    LocIdx loc_idx, size_t size) {
+    // Check if we have a suitable buffer pair
+    BufferPair *pair = buffer_pool_[loc_idx];
+    if (pair && pair->size >= size) return pair;
 
     // No suitable buffer pair found or need larger size, allocate a new one
-    if (it != buffer_pool_.end()) freeBufferPair(it->second);
+    if (pair) freeBufferPair(pair);
 
-    // Get location string for allocBufferPair
-    if (loc_id < 0 || loc_id >= static_cast<LocID>(location_strings_.size())) {
-        std::cerr << "Invalid loc_id: " << loc_id << std::endl;
-        return nullptr;
-    }
-    const std::string &location = location_strings_[loc_id];
+    const std::string &location = location_strings_[loc_idx];
+    pair = allocBufferPair(loc_idx, location, size);
+    buffer_pool_[loc_idx] = pair;
 
-    BufferPair *new_pair = allocBufferPair(loc_id, location, size);
-    if (new_pair) buffer_pool_[loc_id] = new_pair;
-
-    return new_pair;
+    return pair;
 }
 
 // Require regions_mutex_ to be held before calling
 FlexTransferEngine::BufferPair *FlexTransferEngine::allocBufferPair(
-    LocID loc_id, const std::string &location, size_t size) {
+    LocIdx loc_idx, const std::string &location, size_t size) {
     FlexTransferEngine::BufferPair *pair = new FlexTransferEngine::BufferPair();
     pair->size = size;
     pair->is_cuda = (location.find("cuda:") == 0);
@@ -689,12 +682,6 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::allocBufferPair(
 #endif
     } else {
         pair->buffer0 = new char[total_size];
-        if (!pair->buffer0) {
-            std::cerr << "Failed to allocate CPU memory" << std::endl;
-            delete pair;
-            return nullptr;
-        }
-        // Split into two halves
         pair->buffer1 = static_cast<char *>(pair->buffer0) + size;
     }
 
@@ -778,15 +765,16 @@ FlexTransferEngine::MemoryRegion *FlexTransferEngine::getRegion(void *addr,
 }
 
 // Require regions_mutex_ to be held before calling
-FlexTransferEngine::LocID FlexTransferEngine::acquireLocID(
+FlexTransferEngine::LocIdx FlexTransferEngine::getLocIdx(
     const std::string &location) {
     // Linear search to find existing location
     for (size_t i = 0; i < location_strings_.size(); ++i) {
-        if (location_strings_[i] == location) return static_cast<LocID>(i);
+        if (location_strings_[i] == location) return static_cast<LocIdx>(i);
     }
     // Not found, add new location
-    LocID new_idx = static_cast<LocID>(location_strings_.size());
-    location_strings_.push_back(location);
+    LocIdx new_idx = static_cast<LocIdx>(location_strings_.size());
+    location_strings_.emplace_back(location);
+    buffer_pool_.emplace_back(nullptr);
     return new_idx;
 }
 

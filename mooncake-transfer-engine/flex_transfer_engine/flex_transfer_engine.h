@@ -118,12 +118,12 @@ class FlexTransferEngine {
                                    CopyCtrlBlock *ctrl_block);
 
    private:
-    using LocID = int32_t;  // <0 for invalid location
+    using LocIdx = int32_t;  // <0 for invalid location
 
     struct MemoryRegion {
         void *addr;
         size_t length;
-        LocID loc_id;
+        LocIdx loc_idx;
     };
 
     struct BufferPair {
@@ -146,13 +146,13 @@ class FlexTransferEngine {
     MemoryRegion *getRegion(void *addr, size_t length);
 
     // Require regions_mutex_ to be held before calling
-    LocID acquireLocID(const std::string &location);
+    LocIdx getLocIdx(const std::string &location);
 
     // Require regions_mutex_ to be held before calling
-    BufferPair *getOrAllocBufferPair(LocID loc_id, size_t size);
+    BufferPair *getBufferPair(LocIdx loc_idx, size_t size);
 
     // Require regions_mutex_ to be held before calling
-    BufferPair *allocBufferPair(LocID loc_id, const std::string &location,
+    BufferPair *allocBufferPair(LocIdx loc_idx, const std::string &location,
                                 size_t size);
     // Require regions_mutex_ to be held before calling
     void freeBufferPair(BufferPair *pair);
@@ -178,15 +178,17 @@ class FlexTransferEngine {
     // When enable_copy_ is false, these ARE RDMA-registered.
     std::unordered_map<void *, MemoryRegion> copiable_regions_;
 
-    // Buffer pool per location (LocID -> buffer pair)
+    // Buffer pool per location (LocIdx -> buffer pair)
     // Only used when enable_copy is true
-    std::unordered_map<LocID, BufferPair *> buffer_pool_;
+    std::vector<BufferPair *> buffer_pool_;
 
-    // Location string storage (LocID -> location string)
+    // Location string storage (LocIdx -> location string)
+    // Append-only; will never remove entries
     std::vector<std::string> location_strings_;
 
     // Segment cache (segment_name -> segment_id)
     // Used when acting as copy engine to cache opened segments
+    // Append-only; will never remove entries
     std::unordered_map<std::string, segment_id_t> segment_cache_;
     std::mutex segment_cache_mutex_;
 

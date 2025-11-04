@@ -391,27 +391,25 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         requests.push_back(req);
     }
 
-    // Verify all addresses are registered
-    for (size_t i = 0; i < requests.size(); ++i) {
-        void *addr = requests[i].source_addr;
-        if (!isAddressRegistered(addr)) {
-            std::cerr << "Error: Address " << addr << " is not registered"
-                      << std::endl;
-            return;
-        }
-    }
+    // required by getRegion()
+    std::lock_guard<std::mutex> lock(regions_mutex_);
 
-    // Process each request with double buffering
     for (size_t i = 0; i < requests.size(); ++i) {
         void *source_addr = requests[i].source_addr;
         size_t length = requests[i].length;
-        std::string location = getLocation(source_addr);
+        MemoryRegion *region = getRegion(source_addr, length);
+        if (!region) {
+            std::cerr << "Source address " << source_addr
+                      << " not in registered copiable regions" << std::endl;
+            return;
+        }
 
         // Get a buffer pair for this location
-        BufferPair *buffer_pair = getOrAllocBufferPair(location, length);
+        BufferPair *buffer_pair =
+            getOrAllocBufferPair(region->location, length);
         if (!buffer_pair) {
-            std::cerr << "Failed to get buffer pair for location " << location
-                      << std::endl;
+            std::cerr << "Failed to get buffer pair for location "
+                      << region->location << std::endl;
             return;
         }
 
@@ -616,30 +614,23 @@ int FlexTransferEngine::copyMemory(void *dst, const void *src, size_t size,
     }
 }
 
-bool FlexTransferEngine::isAddressRegistered(void *addr) {
-    std::lock_guard<std::mutex> lock(regions_mutex_);
-
-    for (const auto &[base_addr, region] : copiable_regions_) {
-        char *start = static_cast<char *>(base_addr);
-        char *end = start + region.length;
-        if (addr >= start && addr < end) {
-            return true;
-        }
+FlexTransferEngine::MemoryRegion *FlexTransferEngine::getRegion(void *addr,
+                                                                size_t length) {
+    // fast path: the addr is the base of a registered region; we expect it to
+    // be a common case
+    auto it = copiable_regions_.find(addr);
+    if (it != copiable_regions_.end() && length <= it->second.length)
+        return &it->second;
+    // slow path: scan to find addr within a registered region; scan is
+    // acceptable because we don't expect to have too many regions
+    for (auto &[base_addr, region] : copiable_regions_) {
+        if (addr < static_cast<char *>(base_addr)) continue;
+        if (static_cast<char *>(addr) + length >
+            static_cast<char *>(base_addr) + region.length)
+            continue;
+        return &region;
     }
-    return false;
-}
-
-std::string FlexTransferEngine::getLocation(void *addr) {
-    std::lock_guard<std::mutex> lock(regions_mutex_);
-
-    for (const auto &[base_addr, region] : copiable_regions_) {
-        char *start = static_cast<char *>(base_addr);
-        char *end = start + region.length;
-        if (addr >= start && addr < end) {
-            return region.location;
-        }
-    }
-    return "";
+    return nullptr;
 }
 
 // Private methods from DirectTransferEngine

@@ -146,9 +146,8 @@ class FlexTransferEngine {
 
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
-    bool isAddressRegistered(void *addr);
-
-    std::string getLocation(void *addr);
+    // Require regions_mutex_ to be held before calling
+    MemoryRegion* getRegion(void *addr, size_t length);
 
     int connectToCopyEngine(const std::string &server_url);
 

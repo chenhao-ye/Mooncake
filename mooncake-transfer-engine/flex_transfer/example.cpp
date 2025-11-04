@@ -20,8 +20,6 @@
 
 #include "flex_transfer_engine.h"
 
-using namespace mooncake;
-
 int main(int argc, char **argv) {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0]

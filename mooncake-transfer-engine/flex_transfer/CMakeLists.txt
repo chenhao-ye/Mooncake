@@ -3,6 +3,7 @@
 # Collect source files
 set(FLEX_TRANSFER_SOURCES
     flex_transfer_engine.cpp
+    batch.cpp
 )
 
 # Create the flex transfer engine library
@@ -35,6 +36,8 @@ install(TARGETS flex_transfer_engine
 # Install headers
 install(FILES
     flex_transfer_engine.h
+    batch.h
+    ctrl.h
     DESTINATION include/mooncake/flex_transfer
 )
 

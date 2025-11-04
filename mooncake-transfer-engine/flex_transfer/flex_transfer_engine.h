@@ -1,19 +1,4 @@
-// Copyright 2024 KVCache.AI
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-#ifndef FLEX_TRANSFER_ENGINE_H_
-#define FLEX_TRANSFER_ENGINE_H_
+#pragma once
 
 #include <atomic>
 #include <memory>
@@ -23,67 +8,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ctrl.h"
 #include "transfer_engine_c.h"
-
-namespace mooncake {
 
 // Forward declaration
 class FlexTransferEngine;
-
-/**
- * Control block for copy-based transfers.
- * Contains progress counter that is RDMA-accessible.
- */
-struct CopyCtrlBlock {
-    volatile int64_t progress_counter;
-};
-
-/**
- * FlexBatch represents a batch transfer operation.
- * It manages the batch lifecycle including freeing the batch ID and
- * returning the CopyCtrlBlock to the engine cache on destruction.
- */
-class FlexBatch {
-   public:
-    /**
-     * Constructor.
-     * @param engine Backpointer to the FlexTransferEngine
-     */
-    explicit FlexBatch(std::shared_ptr<FlexTransferEngine> engine)
-        : engine_(std::move(engine)),
-          batch_id_(INVALID_BATCH),
-          copy_ctrl_block_(nullptr) {}
-
-    ~FlexBatch();
-
-    void addReadRequest(uintptr_t local_addr, uintptr_t remote_addr,
-                        uint64_t size);
-    void addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
-                         uint64_t size);
-
-    /**
-     * Submit the transfer batch.
-     *
-     * @param target Remote target, either Mooncake segment name or copy server
-     * URL (formatted as "ip:port").
-     * @param is_target_copy If true, target is a copy server URL; if false,
-     * target is a segment name.
-     */
-    int submit(const std::string &target, bool is_target_copy = false);
-
-    /**
-     * Get the status of a transfer task.
-     * @param task_id The task ID within this batch
-     * @param status Output parameter for transfer status
-     */
-    int getTransferStatus(size_t task_id, transfer_status_t &status);
-
-   private:
-    std::shared_ptr<FlexTransferEngine> engine_;
-    batch_id_t batch_id_;
-    CopyCtrlBlock *copy_ctrl_block_;
-    std::vector<transfer_request_t> entries_;
-};
 
 /**
  * FlexTransferEngine is a flexible wrapper on top of TransferEngine that
@@ -99,9 +28,6 @@ class FlexBatch {
  */
 class FlexTransferEngine {
    public:
-    // FlexBatch needs access to private methods like releaseCopyCtrlBlock
-    friend class FlexBatch;
-
     /**
      * Constructor.
      * @param enable_copy If true, starts TCP listener for copy-based transfers
@@ -182,6 +108,14 @@ class FlexTransferEngine {
      */
     transfer_engine_t getEngine() { return engine_; }
 
+    CopyCtrlBlock *acquireCopyCtrlBlock();
+
+    void releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block);
+
+    int submitTransferToCopyEngine(std::vector<transfer_request_t> &entries,
+                                   const std::string &server_url,
+                                   CopyCtrlBlock *ctrl_block);
+
    private:
     struct MemoryRegion {
         void *addr;
@@ -205,8 +139,7 @@ class FlexTransferEngine {
 
     void handleAndProcessRequest(int client_fd);
 
-    BufferPair *getOrAllocBufferPair(const std::string &location,
-                                        size_t size);
+    BufferPair *getOrAllocBufferPair(const std::string &location, size_t size);
 
     BufferPair *allocBufferPair(const std::string &location, size_t size);
     void freeBufferPair(BufferPair *pair);
@@ -218,14 +151,6 @@ class FlexTransferEngine {
     std::string getLocation(void *addr);
 
     int connectToCopyEngine(const std::string &server_url);
-
-    int submitTransferToCopyEngine(std::vector<transfer_request_t> &entries,
-                                   const std::string &server_url,
-                                   CopyCtrlBlock *ctrl_block);
-
-    CopyCtrlBlock *acquireCopyCtrlBlock();
-
-    void releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block);
 
     transfer_engine_t engine_;
     bool enable_copy_;  // Whether to enable copy-based transfer listener
@@ -266,7 +191,3 @@ class FlexTransferEngine {
     std::vector<CopyCtrlBlock *> copy_ctrl_block_cache_;
     std::mutex ctrl_block_mutex_;
 };
-
-}  // namespace mooncake
-
-#endif  // FLEX_TRANSFER_ENGINE_H_

@@ -21,7 +21,7 @@ FlexTransferEngine::~FlexTransferEngine() {
     if (enable_copy_) {
         stopListener();
 
-        std::lock_guard<std::mutex> pool_lock(pool_mutex_);
+        std::lock_guard<std::mutex> lock(regions_mutex_);
         for (auto &[location, pair] : buffer_pool_) freeBufferPair(pair);
         buffer_pool_.clear();
     }
@@ -108,20 +108,16 @@ int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
               << " location " << location << std::endl;
 
     // first ensure we have a (large-enough) buffer pair for this location
-    {
-        std::lock_guard<std::mutex> pool_lock(pool_mutex_);
+    // Check if we have a buffer pair for this location
+    auto it = buffer_pool_.find(loc_id);
+    if (it == buffer_pool_.end() || it->second->size < length) {
+        if (it != buffer_pool_.end()) freeBufferPair(it->second);
 
-        // Check if we have a buffer pair for this location
-        auto it = buffer_pool_.find(loc_id);
-        if (it == buffer_pool_.end() || it->second->size < length) {
-            if (it != buffer_pool_.end()) freeBufferPair(it->second);
-
-            BufferPair *new_pair = allocBufferPair(loc_id, length);
-            if (!new_pair) goto err;
-            buffer_pool_[loc_id] = new_pair;
-            std::cerr << "Allocated buffer pair of size " << length
-                      << " for location " << location << std::endl;
-        }
+        BufferPair *new_pair = allocBufferPair(loc_id, location, length);
+        if (!new_pair) goto err;
+        buffer_pool_[loc_id] = new_pair;
+        std::cerr << "Allocated buffer pair of size " << length
+                  << " for location " << location << std::endl;
     }
 
     return 0;
@@ -137,7 +133,7 @@ int FlexTransferEngine::unregisterLocalMemory(void *addr, bool force_direct) {
     if (force_direct || !enable_copy_)
         return ::unregisterLocalMemory(engine_, addr);
 
-    std::lock_guard<std::mutex> lock(regions_mutex_);
+    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
     size_t num_erased = copiable_regions_.erase(addr);
     return num_erased > 0 ? 0 : -1;
 }
@@ -151,9 +147,6 @@ int FlexTransferEngine::registerLocalMemoryBatch(
                                           buffer_list.size(), location.c_str());
     }
 
-    // Convert location string to LocID and find the largest buffer in the
-    // batch
-
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
     LocID loc_id = acquireLocID(location);
     size_t max_size = 0;
@@ -165,19 +158,15 @@ int FlexTransferEngine::registerLocalMemoryBatch(
     std::cerr << "Registered " << buffer_list.size() << " buffers for location "
               << location << ", max size " << max_size << std::endl;
 
-    {
-        std::lock_guard<std::mutex> pool_lock(pool_mutex_);
-
-        // Check if we have a buffer pair for this location
-        auto it = buffer_pool_.find(loc_id);
-        if (it == buffer_pool_.end() || it->second->size < max_size) {
-            if (it != buffer_pool_.end()) freeBufferPair(it->second);
-            BufferPair *new_pair = allocBufferPair(loc_id, max_size);
-            if (!new_pair) goto err;
-            buffer_pool_[loc_id] = new_pair;
-            std::cerr << "Allocated buffer pair of size " << max_size
-                      << " for location " << location << std::endl;
-        }
+    // Check if we have a buffer pair for this location
+    auto it = buffer_pool_.find(loc_id);
+    if (it == buffer_pool_.end() || it->second->size < max_size) {
+        if (it != buffer_pool_.end()) freeBufferPair(it->second);
+        BufferPair *new_pair = allocBufferPair(loc_id, location, max_size);
+        if (!new_pair) goto err;
+        buffer_pool_[loc_id] = new_pair;
+        std::cerr << "Allocated buffer pair of size " << max_size
+                  << " for location " << location << std::endl;
     }
 
     return 0;
@@ -206,7 +195,7 @@ int FlexTransferEngine::unregisterLocalMemoryBatch(
      */
     int ret = 0;
 
-    std::lock_guard<std::mutex> lock(regions_mutex_);
+    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
     for (void *addr : addr_list) {
         auto it = copiable_regions_.find(addr);
         if (it != copiable_regions_.end()) {
@@ -223,7 +212,154 @@ int FlexTransferEngine::syncSegmentCache() {
     return ::syncSegmentCache(engine_);
 }
 
-// Private methods from CopyTransferEngine
+CopyCtrlBlock *FlexTransferEngine::acquireCopyCtrlBlock() {
+    std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
+
+    // Try to get from cache first
+    if (!copy_ctrl_block_cache_.empty()) {
+        CopyCtrlBlock *ctrl_block = copy_ctrl_block_cache_.back();
+        copy_ctrl_block_cache_.pop_back();
+        ctrl_block->progress_counter = 0;
+        return ctrl_block;
+    }
+
+    // Cache is empty, allocate a new one
+    CopyCtrlBlock *ctrl_block = new CopyCtrlBlock();
+    ctrl_block->progress_counter = 0;
+
+    // Register it with RDMA using the specified location
+    int ret = ::registerLocalMemory(engine_, ctrl_block, sizeof(CopyCtrlBlock),
+                                    ctrl_block_location_.c_str(), 1);
+    if (ret < 0) {
+        std::cerr << "Failed to register CopyCtrlBlock with RDMA" << std::endl;
+        delete ctrl_block;
+        return nullptr;
+    }
+
+    std::cerr << "Allocated and registered new CopyCtrlBlock at " << ctrl_block
+              << std::endl;
+    return ctrl_block;
+}
+
+void FlexTransferEngine::releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block) {
+    if (!ctrl_block) return;
+    std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
+    copy_ctrl_block_cache_.push_back(ctrl_block);
+}
+
+int FlexTransferEngine::submitTransferToCopyEngine(
+    std::vector<transfer_request_t> &entries, const std::string &server_url,
+    CopyCtrlBlock *ctrl_block) {
+    // Verify all entries are read requests
+    for (const auto &entry : entries) {
+        if (entry.opcode != OPCODE_READ) {
+            std::cerr << "Only read requests are supported when target is "
+                         "FlexTransferEngine with copy mode"
+                      << std::endl;
+            return -1;
+        }
+    }
+
+    if (entries.empty()) return 0;
+
+    if (!ctrl_block) {
+        std::cerr << "Error: ctrl_block is nullptr for copy-based transfer"
+                  << std::endl;
+        return -1;
+    }
+
+    // Connect to the remote FlexTransferEngine (or reuse existing connection)
+    int fd = -1;
+    {
+        std::lock_guard<std::mutex> lock(connections_mutex_);
+        auto it = copy_engine_connections_.find(server_url);
+        if (it != copy_engine_connections_.end()) {
+            fd = it->second;
+        } else {
+            fd = connectToCopyEngine(server_url);
+            if (fd < 0) {
+                std::cerr << "Failed to connect to FlexTransferEngine at "
+                          << server_url << std::endl;
+                return -1;
+            }
+            copy_engine_connections_[server_url] = fd;
+        }
+    }
+
+    // Send protocol to remote FlexTransferEngine:
+    // 1. Segment name length (4 bytes)
+    // 2. Segment name (variable length)
+    // 3. Progress address (8 bytes)
+    // 4. Number of requests (8 bytes)
+    // 5. For each request: source_addr (8 bytes), target_addr (8 bytes), length
+    // (8 bytes)
+
+    // Send segment name length
+    uint32_t segment_name_len = local_server_name_.size();
+    if (writeFully(fd, &segment_name_len, sizeof(segment_name_len)) !=
+        sizeof(segment_name_len)) {
+        std::cerr << "Failed to send segment name length to FlexTransferEngine"
+                  << std::endl;
+        return -1;
+    }
+
+    // Send segment name
+    if (writeFully(fd, local_server_name_.c_str(), segment_name_len) !=
+        segment_name_len) {
+        std::cerr << "Failed to send segment name to FlexTransferEngine"
+                  << std::endl;
+        return -1;
+    }
+
+    // Send batch info
+    struct BatchInfo {
+        uint64_t progress_addr;
+        uint64_t num_requests;
+    };
+
+    BatchInfo batch_info;
+    batch_info.progress_addr =
+        reinterpret_cast<uint64_t>(&ctrl_block->progress_counter);
+    batch_info.num_requests = entries.size();
+
+    if (writeFully(fd, &batch_info, sizeof(batch_info)) != sizeof(batch_info)) {
+        std::cerr << "Failed to send batch info to FlexTransferEngine"
+                  << std::endl;
+        return -1;
+    }
+
+    // Send request details (source on remote FlexTransferEngine, target on
+    // local FlexTransferEngine)
+    for (const auto &entry : entries) {
+        struct RequestInfo {
+            uint64_t source_addr;
+            uint64_t target_addr;
+            uint64_t length;
+        };
+
+        RequestInfo req_info;
+        req_info.source_addr = reinterpret_cast<uint64_t>(entry.source);
+        req_info.target_addr = entry.target_offset;
+        req_info.length = entry.length;
+
+        if (writeFully(fd, &req_info, sizeof(req_info)) != sizeof(req_info)) {
+            std::cerr << "Failed to send request info to FlexTransferEngine"
+                      << std::endl;
+            return -1;
+        }
+    }
+
+    // The remote FlexTransferEngine will now process the requests
+    // asynchronously and update the progress counter via RDMA writes. The
+    // caller should poll the progress or use getTransferStatus to check
+    // completion.
+
+    std::cerr << "Submitted " << entries.size()
+              << " requests to FlexTransferEngine at " << server_url
+              << std::endl;
+
+    return 0;
+}
 
 int FlexTransferEngine::startListener() {
     // Use findAvailableTcpPort to find an available port
@@ -395,8 +531,7 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         requests.push_back(req);
     }
 
-    // required by getRegion()
-    std::lock_guard<std::mutex> lock(regions_mutex_);
+    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
 
     for (size_t i = 0; i < requests.size(); ++i) {
         void *source_addr = requests[i].source_addr;
@@ -502,37 +637,31 @@ segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {
     return segment_id;
 }
 
+// Require regions_mutex_ to be held before calling
 FlexTransferEngine::BufferPair *FlexTransferEngine::getOrAllocBufferPair(
     LocID loc_id, size_t size) {
-    std::lock_guard<std::mutex> lock(pool_mutex_);
-
     auto it = buffer_pool_.find(loc_id);
-    if (it != buffer_pool_.end() && it->second->size >= size) {
-        return it->second;
-    }
+    if (it != buffer_pool_.end() && it->second->size >= size) return it->second;
 
     // No suitable buffer pair found or need larger size, allocate a new one
     if (it != buffer_pool_.end()) freeBufferPair(it->second);
 
-    BufferPair *new_pair = allocBufferPair(loc_id, size);
+    // Get location string for allocBufferPair
+    if (loc_id < 0 || loc_id >= static_cast<LocID>(location_strings_.size())) {
+        std::cerr << "Invalid loc_id: " << loc_id << std::endl;
+        return nullptr;
+    }
+    const std::string &location = location_strings_[loc_id];
+
+    BufferPair *new_pair = allocBufferPair(loc_id, location, size);
     if (new_pair) buffer_pool_[loc_id] = new_pair;
 
     return new_pair;
 }
 
+// Require regions_mutex_ to be held before calling
 FlexTransferEngine::BufferPair *FlexTransferEngine::allocBufferPair(
-    LocID loc_id, size_t size) {
-    // Get the location string from loc_id (protected by regions_mutex_)
-    std::string location;
-    {
-        std::lock_guard<std::mutex> lock(regions_mutex_);
-        if (loc_id < 0 || loc_id >= static_cast<LocID>(location_strings_.size())) {
-            std::cerr << "Invalid loc_id: " << loc_id << std::endl;
-            return nullptr;
-        }
-        location = location_strings_[loc_id];
-    }
-
+    LocID loc_id, const std::string &location, size_t size) {
     FlexTransferEngine::BufferPair *pair = new FlexTransferEngine::BufferPair();
     pair->size = size;
     pair->is_cuda = (location.find("cuda:") == 0);
@@ -590,6 +719,7 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::allocBufferPair(
     return pair;
 }
 
+// Require regions_mutex_ to be held before calling
 void FlexTransferEngine::freeBufferPair(BufferPair *pair) {
     if (!pair) return;
 
@@ -658,45 +788,6 @@ FlexTransferEngine::LocID FlexTransferEngine::acquireLocID(
     LocID new_idx = static_cast<LocID>(location_strings_.size());
     location_strings_.push_back(location);
     return new_idx;
-}
-
-// Private methods from DirectTransferEngine
-
-CopyCtrlBlock *FlexTransferEngine::acquireCopyCtrlBlock() {
-    std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
-
-    // Try to get from cache first
-    if (!copy_ctrl_block_cache_.empty()) {
-        CopyCtrlBlock *ctrl_block = copy_ctrl_block_cache_.back();
-        copy_ctrl_block_cache_.pop_back();
-        ctrl_block->progress_counter = 0;
-        return ctrl_block;
-    }
-
-    // Cache is empty, allocate a new one
-    CopyCtrlBlock *ctrl_block = new CopyCtrlBlock();
-    ctrl_block->progress_counter = 0;
-
-    // Register it with RDMA using the specified location
-    int ret = ::registerLocalMemory(
-        engine_, ctrl_block, sizeof(CopyCtrlBlock),
-        ctrl_block_location_.empty() ? nullptr : ctrl_block_location_.c_str(),
-        1);
-    if (ret < 0) {
-        std::cerr << "Failed to register CopyCtrlBlock with RDMA" << std::endl;
-        delete ctrl_block;
-        return nullptr;
-    }
-
-    std::cerr << "Allocated and registered new CopyCtrlBlock at " << ctrl_block
-              << std::endl;
-    return ctrl_block;
-}
-
-void FlexTransferEngine::releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block) {
-    if (!ctrl_block) return;
-    std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
-    copy_ctrl_block_cache_.push_back(ctrl_block);
 }
 
 int FlexTransferEngine::connectToCopyEngine(const std::string &server_url) {
@@ -775,122 +866,4 @@ int FlexTransferEngine::connectToCopyEngine(const std::string &server_url) {
     std::cerr << "Connected to FlexTransferEngine at " << server_url
               << std::endl;
     return fd;
-}
-
-int FlexTransferEngine::submitTransferToCopyEngine(
-    std::vector<transfer_request_t> &entries, const std::string &server_url,
-    CopyCtrlBlock *ctrl_block) {
-    // Verify all entries are read requests
-    for (const auto &entry : entries) {
-        if (entry.opcode != OPCODE_READ) {
-            std::cerr << "Only read requests are supported when target is "
-                         "FlexTransferEngine with copy mode"
-                      << std::endl;
-            return -1;
-        }
-    }
-
-    if (entries.empty()) return 0;
-
-    if (!ctrl_block) {
-        std::cerr << "Error: ctrl_block is nullptr for copy-based transfer"
-                  << std::endl;
-        return -1;
-    }
-
-    // Connect to the remote FlexTransferEngine (or reuse existing connection)
-    int fd = -1;
-    {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
-        auto it = copy_engine_connections_.find(server_url);
-        if (it != copy_engine_connections_.end()) {
-            fd = it->second;
-        } else {
-            fd = connectToCopyEngine(server_url);
-            if (fd < 0) {
-                std::cerr << "Failed to connect to FlexTransferEngine at "
-                          << server_url << std::endl;
-                return -1;
-            }
-            copy_engine_connections_[server_url] = fd;
-        }
-    }
-
-    // Send protocol to remote FlexTransferEngine:
-    // 1. Segment name length (4 bytes)
-    // 2. Segment name (variable length)
-    // 3. Progress address (8 bytes)
-    // 4. Number of requests (8 bytes)
-    // 5. For each request: source_addr (8 bytes), target_addr (8 bytes), length
-    // (8 bytes)
-
-    // Send segment name length
-    uint32_t segment_name_len = local_server_name_.size();
-    if (writeFully(fd, &segment_name_len, sizeof(segment_name_len)) !=
-        sizeof(segment_name_len)) {
-        std::cerr << "Failed to send segment name length to FlexTransferEngine"
-                  << std::endl;
-        return -1;
-    }
-
-    // Send segment name
-    if (writeFully(fd, local_server_name_.c_str(), segment_name_len) !=
-        segment_name_len) {
-        std::cerr << "Failed to send segment name to FlexTransferEngine"
-                  << std::endl;
-        return -1;
-    }
-
-    // Send batch info
-    struct BatchInfo {
-        uint64_t progress_addr;
-        uint64_t num_requests;
-    };
-
-    BatchInfo batch_info;
-    batch_info.progress_addr =
-        reinterpret_cast<uint64_t>(&ctrl_block->progress_counter);
-    batch_info.num_requests = entries.size();
-
-    if (writeFully(fd, &batch_info, sizeof(batch_info)) != sizeof(batch_info)) {
-        std::cerr << "Failed to send batch info to FlexTransferEngine"
-                  << std::endl;
-        return -1;
-    }
-
-    // Send request details (source on remote FlexTransferEngine, target on
-    // local FlexTransferEngine)
-    for (const auto &entry : entries) {
-        struct RequestInfo {
-            uint64_t source_addr;
-            uint64_t target_addr;
-            uint64_t length;
-        };
-
-        RequestInfo req_info;
-        req_info.source_addr = reinterpret_cast<uint64_t>(entry.source);
-        req_info.target_addr = entry.target_offset;
-        req_info.length = entry.length;
-
-        if (writeFully(fd, &req_info, sizeof(req_info)) != sizeof(req_info)) {
-            std::cerr << "Failed to send request info to FlexTransferEngine"
-                      << std::endl;
-            return -1;
-        }
-    }
-
-    // The remote FlexTransferEngine will now process the requests
-    // asynchronously and update the progress counter via RDMA writes. The
-    // caller should poll the progress or use getTransferStatus to check
-    // completion.
-
-    std::cerr << "Submitted " << entries.size()
-              << " requests to FlexTransferEngine at " << server_url
-              << std::endl;
-
-    return 0;
-}
-
-std::string FlexTransferEngine::getCopyServerUrl() const {
-    return local_copy_server_url_;
 }

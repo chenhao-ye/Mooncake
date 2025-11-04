@@ -102,7 +102,7 @@ class FlexTransferEngine {
      * instances to submit copy-based transfer requests.
      * Returns empty string if enable_copy_ is false.
      */
-    std::string getCopyServerUrl() const;
+    std::string getCopyServerUrl() const { return local_copy_server_url_; }
 
     /**
      * Get the underlying TransferEngine handle.
@@ -118,7 +118,7 @@ class FlexTransferEngine {
                                    CopyCtrlBlock *ctrl_block);
 
    private:
-    using LocID = int32_t; // <0 for invalid location
+    using LocID = int32_t;  // <0 for invalid location
 
     struct MemoryRegion {
         void *addr;
@@ -143,26 +143,33 @@ class FlexTransferEngine {
     void handleAndProcessRequest(int client_fd);
 
     // Require regions_mutex_ to be held before calling
+    MemoryRegion *getRegion(void *addr, size_t length);
+
+    // Require regions_mutex_ to be held before calling
     LocID acquireLocID(const std::string &location);
 
+    // Require regions_mutex_ to be held before calling
     BufferPair *getOrAllocBufferPair(LocID loc_id, size_t size);
 
-    BufferPair *allocBufferPair(LocID loc_id, size_t size);
+    // Require regions_mutex_ to be held before calling
+    BufferPair *allocBufferPair(LocID loc_id, const std::string &location,
+                                size_t size);
+    // Require regions_mutex_ to be held before calling
     void freeBufferPair(BufferPair *pair);
 
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
-    // Require regions_mutex_ to be held before calling
-    MemoryRegion *getRegion(void *addr, size_t length);
-
     int connectToCopyEngine(const std::string &server_url);
 
     transfer_engine_t engine_;
-    bool enable_copy_;  // Whether to enable copy-based transfer listener
-    std::string ctrl_block_location_;  // CopyCtrlBlock registration location
+    const bool enable_copy_;  // Whether to enable copy-based transfer
+    const std::string ctrl_block_location_;
 
     // Local server name (also serves as the local RAM segment name)
     std::string local_server_name_;
+
+    // Protects copiable_regions_, location_strings_, and buffer_pool_
+    std::mutex regions_mutex_;
 
     // Copiable memory regions (addr -> region info)
     // Tracks regions that can be read via copy transfer.
@@ -171,16 +178,12 @@ class FlexTransferEngine {
     // When enable_copy_ is false, these ARE RDMA-registered.
     std::unordered_map<void *, MemoryRegion> copiable_regions_;
 
-    // Location string storage (LocID -> location string)
-    // Protected by regions_mutex_
-    std::vector<std::string> location_strings_;
-
-    std::mutex regions_mutex_;
-
     // Buffer pool per location (LocID -> buffer pair)
     // Only used when enable_copy is true
     std::unordered_map<LocID, BufferPair *> buffer_pool_;
-    std::mutex pool_mutex_;
+
+    // Location string storage (LocID -> location string)
+    std::vector<std::string> location_strings_;
 
     // Segment cache (segment_name -> segment_id)
     // Used when acting as copy engine to cache opened segments

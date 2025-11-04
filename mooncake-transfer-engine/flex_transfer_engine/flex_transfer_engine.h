@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "ctrl.h"
+#include "transfer_engine.h"
 #include "transfer_engine_c.h"
 
 // Forward declaration
@@ -127,12 +128,13 @@ class FlexTransferEngine {
     };
 
     struct BufferPair {
-        void *buffer0;  // First half (also the base address of allocation)
-        void *buffer1;  // Second half
-        size_t size;    // Size of each half
-        bool is_cuda;   // true if CUDA memory, false if CPU memory
-        bool buffer0_in_use;
-        bool buffer1_in_use;
+        void *buffers[2];  // buffers[0] is first half, buffers[1] is second half
+                           // buffers[0] is also the base address of allocation
+        size_t size;       // Size of each half
+        bool is_cuda;      // true if CUDA memory, false if CPU memory
+        // if buffers_user[i] != INVALID_BATCH, it means that buffer is currently
+        // used by that batch. Each batch should be size=1.
+        batch_id_t buffers_user[2];
     };
 
     void workerThread();
@@ -156,6 +158,10 @@ class FlexTransferEngine {
                                 size_t size);
     // Require regions_mutex_ to be held before calling
     void freeBufferPair(BufferPair *pair);
+
+    int waitOneBufferAvailable(BufferPair *pair);
+
+    void waitAllBuffersAvailable(BufferPair *pair);
 
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 

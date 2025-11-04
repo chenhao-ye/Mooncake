@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-#include "ctrl.h"
 #include "transfer_engine_c.h"
 
+struct CopyCtrlBlock;
 class FlexTransferEngine;
 
 /**

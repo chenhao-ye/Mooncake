@@ -9,55 +9,46 @@
 #include <unordered_map>
 #include <vector>
 
-#include "ctrl.h"
 #include "transfer_engine.h"
 #include "transfer_engine_c.h"
 
 // Forward declaration
 class FlexTransferEngine;
 
+struct CopyCtrlBlock {
+    volatile int64_t progress_counter;
+};
+
 /**
  * FlexTransferEngine is a flexible wrapper on top of TransferEngine that
  * supports both direct RDMA transfers and copy-based transfers.
  *
- * When enable_copy is true, it starts a TCP listener to accept transfer
- * requests from other FlexTransferEngine instances, acting as a
- * CopyTransferEngine. It maintains pre-registered buffers to avoid frequent
- * RDMA memory registration overhead.
+ * Direct Mode: Register the user-specified memory directly with RDMA NICs;
+ * other FlexTransferEngine can directly read/write these memory without
+ * CPU involvement.
  *
- * When submitting transfers, users can specify a copy_server_url to use
- * copy-based transfer via TCP, or leave it empty for direct RDMA transfer.
+ * Copy Mode: Only register some buffers with RDMA NICs. A background TCP
+ * listener thread will accept the requests and copy dataf from user-specified
+ * memory into the buffers and submit RDMA requests.
+ *
+ * Copy Mode is enabled via flag `enable_copy_` at construction time.
  */
 class FlexTransferEngine {
    public:
     /**
      * Constructor.
+     * @param metadata_conn_string Connection string for metadata server
+     * @param local_server_name Local server name
      * @param enable_copy If true, starts TCP listener for copy-based transfers
      * @param ctrl_block_location Location for CopyCtrlBlock registration (e.g.,
-     * "cuda:0" for GPU)
+     * "cpu:0")
      */
-    explicit FlexTransferEngine(bool enable_copy = false,
-                                const std::string &ctrl_block_location = "")
-        : engine_(nullptr),
-          enable_copy_(enable_copy),
-          ctrl_block_location_(ctrl_block_location),
-          worker_running_(false),
-          listener_fd_(-1) {}
+    explicit FlexTransferEngine(const std::string &metadata_conn_string,
+                                const std::string &local_server_name,
+                                bool enable_copy,
+                                const std::string &ctrl_block_location);
 
     ~FlexTransferEngine();
-
-    /**
-     * Initialize the transfer engine.
-     * TCP port for copy-based transfer listener is automatically selected when
-     * enable_copy is true.
-     */
-    int init(const std::string &metadata_conn_string,
-             const std::string &local_server_name, bool auto_discover = true);
-
-    /**
-     * Get a segment ID by name (will open the segment if not cached).
-     */
-    segment_id_t getSegmentId(const std::string &segment_name);
 
     /**
      * Register local memory with the transfer engine.
@@ -95,7 +86,7 @@ class FlexTransferEngine {
     /**
      * Sync segment cache with metadata server.
      */
-    int syncSegmentCache();
+    int syncSegmentCache() { return ::syncSegmentCache(engine_); }
 
     /**
      * Get the copy server URL for this FlexTransferEngine instance.
@@ -103,12 +94,14 @@ class FlexTransferEngine {
      * instances to submit copy-based transfer requests.
      * Returns empty string if enable_copy_ is false.
      */
-    std::string getCopyServerUrl() const { return local_copy_server_url_; }
+    const std::string &getCopyServerUrl() const {
+        return local_copy_server_url_;
+    }
 
-    /**
-     * Get the underlying TransferEngine handle.
-     */
+    // for FlexBatch
     transfer_engine_t getEngine() { return engine_; }
+
+    segment_id_t getSegmentId(const std::string &segment_name);
 
     CopyCtrlBlock *acquireCopyCtrlBlock();
 
@@ -128,21 +121,15 @@ class FlexTransferEngine {
     };
 
     struct BufferPair {
-        void *buffers[2];  // buffers[0] is first half, buffers[1] is second half
-                           // buffers[0] is also the base address of allocation
-        size_t size;       // Size of each half
-        bool is_cuda;      // true if CUDA memory, false if CPU memory
-        // if buffers_user[i] != INVALID_BATCH, it means that buffer is currently
-        // used by that batch. Each batch should be size=1.
+        void
+            *buffers[2];  // buffers[0] is first half, buffers[1] is second half
+                          // buffers[0] is also the base address of allocation
+        size_t size;      // Size of each half
+        bool is_cuda;     // true if CUDA memory, false if CPU memory
+        // if buffers_user[i] != INVALID_BATCH, it means that buffer is
+        // currently used by that batch. Each batch should be size=1.
         batch_id_t buffers_user[2];
     };
-
-    void workerThread();
-
-    int startListener();
-    void stopListener();
-
-    void handleAndProcessRequest(int client_fd);
 
     // Require regions_mutex_ to be held before calling
     MemoryRegion *getRegion(void *addr, size_t length);
@@ -165,14 +152,22 @@ class FlexTransferEngine {
 
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
+    // TCP listener and worker thread functions
+    int startListener();
+
+    void stopListener();
+
+    void workerThread();
+
+    void handleAndProcessRequest(int client_fd);
+
     int connectToCopyEngine(const std::string &server_url);
 
-    transfer_engine_t engine_;
+    std::string local_server_name_;
     const bool enable_copy_;  // Whether to enable copy-based transfer
     const std::string ctrl_block_location_;
 
-    // Local server name (also serves as the local RAM segment name)
-    std::string local_server_name_;
+    transfer_engine_t engine_;
 
     // Protects copiable_regions_, location_strings_, and buffer_pool_
     std::mutex regions_mutex_;

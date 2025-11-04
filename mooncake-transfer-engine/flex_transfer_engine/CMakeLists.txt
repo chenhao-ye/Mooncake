@@ -33,13 +33,12 @@ install(TARGETS flex_transfer_engine
     ARCHIVE DESTINATION lib
 )
 
-# Install headers
-install(FILES
-    flex_transfer_engine.h
-    batch.h
-    ctrl.h
-    DESTINATION include/mooncake/flex_transfer
-)
+# # Install headers
+# install(FILES
+#     flex_transfer_engine.h
+#     batch.h
+#     DESTINATION include/mooncake/flex_transfer_engine
+# )
 
 # Build example program
 if (BUILD_EXAMPLES)

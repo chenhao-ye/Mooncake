@@ -11,6 +11,7 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <unordered_set>
 
 #include "transfer_engine_c.h"
@@ -20,6 +21,29 @@
 #endif
 
 #include "util.h"
+
+FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
+                                       const std::string &local_server_name,
+                                       bool enable_copy,
+                                       const std::string &ctrl_block_location)
+    : local_server_name_(local_server_name),
+      enable_copy_(enable_copy),
+      ctrl_block_location_(ctrl_block_location),
+      worker_running_(false),
+      listener_fd_(-1) {
+    // Create the underlying TransferEngine
+    engine_ = ::createTransferEngine(metadata_conn_string.c_str(),
+                                     local_server_name.c_str(),
+                                     /*unused*/ local_server_name.c_str(),
+                                     /*unused*/ 12345, /*auto_discover*/ true);
+    if (!engine_) throw std::runtime_error("Failed to create TransferEngine");
+
+    // Start TCP listener only if enable_copy_ is true
+    if (enable_copy_) {
+        int rc = startListener();
+        if (rc < 0) throw std::runtime_error("Failed to start TCP listener");
+    }
+}
 
 FlexTransferEngine::~FlexTransferEngine() {
     if (enable_copy_) {
@@ -36,7 +60,7 @@ FlexTransferEngine::~FlexTransferEngine() {
         std::lock_guard<std::mutex> segment_lock(segment_cache_mutex_);
         for (auto &[segment_name, segment_id] : segment_cache_)
             ::closeSegment(engine_, segment_id);
-        segment_cache_.clear();
+        // segment_cache_.clear();
     }
 
     {
@@ -45,44 +69,10 @@ FlexTransferEngine::~FlexTransferEngine() {
             if (engine_) ::unregisterLocalMemory(engine_, ctrl_block);
             delete ctrl_block;
         }
-        copy_ctrl_block_cache_.clear();
+        // copy_ctrl_block_cache_.clear();
     }
 
     if (engine_) ::destroyTransferEngine(engine_);
-}
-
-int FlexTransferEngine::init(const std::string &metadata_conn_string,
-                             const std::string &local_server_name,
-                             bool auto_discover) {
-    local_server_name_ = local_server_name;
-
-    // Create the underlying TransferEngine
-    engine_ = ::createTransferEngine(metadata_conn_string.c_str(),
-                                     local_server_name.c_str(),
-                                     /*unused*/ local_server_name.c_str(),
-                                     /*unused*/ 12345, auto_discover);
-    if (!engine_) {
-        std::cerr << "Failed to create TransferEngine" << std::endl;
-        return -1;
-    }
-
-    // Start TCP listener only if enable_copy_ is true
-    if (enable_copy_) {
-        int ret = startListener();
-        if (ret < 0) {
-            std::cerr << "Failed to start TCP listener" << std::endl;
-            return ret;
-        }
-        std::cerr << "FlexTransferEngine initialized successfully with copy "
-                     "support enabled"
-                  << std::endl;
-    } else {
-        std::cerr << "FlexTransferEngine initialized successfully in direct "
-                     "mode"
-                  << std::endl;
-    }
-
-    return 0;
 }
 
 int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
@@ -210,8 +200,18 @@ int FlexTransferEngine::unregisterLocalMemoryBatch(
     return ret;
 }
 
-int FlexTransferEngine::syncSegmentCache() {
-    return ::syncSegmentCache(engine_);
+segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {
+    std::lock_guard<std::mutex> lock(segment_cache_mutex_);
+    auto it = segment_cache_.find(segment_name);
+    if (it != segment_cache_.end()) return it->second;
+
+    segment_id_t segment_id = ::openSegment(engine_, segment_name.c_str());
+    if (segment_id < 0) {
+        std::cerr << "Failed to open segment: " << segment_name << std::endl;
+        return -1;
+    }
+    segment_cache_[segment_name] = segment_id;
+    return segment_id;
 }
 
 CopyCtrlBlock *FlexTransferEngine::acquireCopyCtrlBlock() {
@@ -362,6 +362,194 @@ int FlexTransferEngine::submitTransferToCopyEngine(
 
     return 0;
 }
+
+/* Private functions */
+
+FlexTransferEngine::MemoryRegion *FlexTransferEngine::getRegion(void *addr,
+                                                                size_t length) {
+    // fast path: the addr is the base of a registered region; we expect it to
+    // be a common case
+    auto it = copiable_regions_.find(addr);
+    if (it != copiable_regions_.end() && length <= it->second.length)
+        return &it->second;
+    // slow path: scan to find addr within a registered region; scan is
+    // acceptable because we don't expect to have too many regions
+    for (auto &[base_addr, region] : copiable_regions_) {
+        if (addr < static_cast<char *>(base_addr)) continue;
+        if (static_cast<char *>(addr) + length >
+            static_cast<char *>(base_addr) + region.length)
+            continue;
+        return &region;
+    }
+    return nullptr;
+}
+
+// Require regions_mutex_ to be held before calling
+FlexTransferEngine::LocIdx FlexTransferEngine::getLocIdx(
+    const std::string &location) {
+    // Linear search to find existing location
+    for (size_t i = 0; i < location_strings_.size(); ++i) {
+        if (location_strings_[i] == location) return static_cast<LocIdx>(i);
+    }
+    // Not found, add new location
+    LocIdx new_idx = static_cast<LocIdx>(location_strings_.size());
+    location_strings_.emplace_back(location);
+    buffer_pool_.emplace_back(nullptr);
+    return new_idx;
+}
+
+int FlexTransferEngine::waitOneBufferAvailable(BufferPair *pair) {
+    // Check if any buffer is immediately available
+    for (int i = 0; i < 2; ++i) {
+        if (pair->buffers_user[i] == INVALID_BATCH) return i;
+    }
+
+    [[maybe_unused]] int rc;
+    transfer_status_t status;
+    while (true) {
+        for (int i = 0; i < 2; ++i) {
+            batch_id_t batch_id = pair->buffers_user[i];
+            rc = ::getTransferStatus(engine_, batch_id, 0, &status);
+            assert(rc == 0);
+            // TODO: error handling
+            if (status.status != STATUS_PENDING) {
+                // Buffer is now available (batch completed or errored)
+                ::freeBatchID(engine_, batch_id);
+                pair->buffers_user[i] = INVALID_BATCH;
+                return i;
+            }
+        }
+    }
+}
+
+void FlexTransferEngine::waitAllBuffersAvailable(BufferPair *pair) {
+    [[maybe_unused]] int rc;
+    transfer_status_t status;
+    for (int i = 0; i < 2; ++i) {
+        batch_id_t batch_id = pair->buffers_user[i];
+        if (batch_id == INVALID_BATCH) continue;
+        rc = ::getTransferStatus(engine_, batch_id, 0, &status);
+        assert(rc == 0);
+        // TODO: error handling
+        if (status.status != STATUS_PENDING) {
+            // Buffer is now available (batch completed or errored)
+            ::freeBatchID(engine_, batch_id);
+            pair->buffers_user[i] = INVALID_BATCH;
+        }
+    }
+}
+
+// Require regions_mutex_ to be held before calling
+FlexTransferEngine::BufferPair *FlexTransferEngine::getBufferPair(
+    LocIdx loc_idx, size_t size) {
+    // Check if we have a suitable buffer pair
+    BufferPair *pair = buffer_pool_[loc_idx];
+    if (pair && pair->size >= size) return pair;
+
+    // No suitable buffer pair found or need larger size, allocate a new one
+    if (pair) freeBufferPair(pair);
+
+    const std::string &location = location_strings_[loc_idx];
+    pair = allocBufferPair(loc_idx, location, size);
+    buffer_pool_[loc_idx] = pair;
+
+    return pair;
+}
+
+// Require regions_mutex_ to be held before calling
+FlexTransferEngine::BufferPair *FlexTransferEngine::allocBufferPair(
+    LocIdx loc_idx, const std::string &location, size_t size) {
+    FlexTransferEngine::BufferPair *pair = new FlexTransferEngine::BufferPair();
+    pair->size = size;
+    pair->is_cuda = (location.find("cuda:") == 0);
+    pair->buffers_user[0] = INVALID_BATCH;
+    pair->buffers_user[1] = INVALID_BATCH;
+
+    // Allocate one contiguous buffer that's 2*size
+    size_t total_size = 2 * size;
+    if (pair->is_cuda) {
+#ifdef USE_CUDA
+        cudaError_t err = cudaMalloc(&pair->buffers[0], total_size);
+        if (err != cudaSuccess) {
+            std::cerr << "Failed to allocate GPU memory: "
+                      << cudaGetErrorString(err) << std::endl;
+            delete pair;
+            return nullptr;
+        }
+        // Split into two halves
+        pair->buffers[1] = static_cast<char *>(pair->buffers[0]) + size;
+#else
+        std::cerr << "GPU memory requested but CUDA support not compiled"
+                  << std::endl;
+        delete pair;
+        return nullptr;
+#endif
+    } else {
+        pair->buffers[0] = new char[total_size];
+        pair->buffers[1] = static_cast<char *>(pair->buffers[0]) + size;
+    }
+
+    // Register the entire contiguous buffer with RDMA
+    int ret = ::registerLocalMemory(engine_, pair->buffers[0], total_size,
+                                    location.c_str(), 1);
+    if (ret < 0) {
+        std::cerr << "Failed to register buffer with RDMA" << std::endl;
+        if (pair->is_cuda) {
+#ifdef USE_CUDA
+            cudaFree(pair->buffers[0]);
+#endif
+        } else {
+            delete[] static_cast<char *>(pair->buffers[0]);
+        }
+        delete pair;
+        return nullptr;
+    }
+
+    std::cerr << "Allocated buffer pair of size " << size << " for location "
+              << location << " (total=" << total_size << ")" << std::endl;
+    return pair;
+}
+
+// Require regions_mutex_ to be held before calling
+void FlexTransferEngine::freeBufferPair(BufferPair *pair) {
+    if (!pair) return;
+
+    ::unregisterLocalMemory(engine_, pair->buffers[0]);
+
+    if (pair->is_cuda) {
+#ifdef USE_CUDA
+        cudaFree(pair->buffers[0]);
+#endif
+    } else {
+        delete[] static_cast<char *>(pair->buffers[0]);
+    }
+
+    delete pair;
+}
+
+int FlexTransferEngine::copyMemory(void *dst, const void *src, size_t size,
+                                   bool is_cuda) {
+    if (is_cuda) {
+#ifdef USE_CUDA
+        cudaError_t err = cudaMemcpy(dst, src, size, cudaMemcpyDefault);
+        if (err != cudaSuccess) {
+            std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(err)
+                      << std::endl;
+            return -1;
+        }
+        return 0;
+#else
+        std::cerr << "GPU memory copy requested but CUDA support not compiled"
+                  << std::endl;
+        return -1;
+#endif
+    } else {
+        memcpy(dst, src, size);
+        return 0;
+    }
+}
+
+/* TCP listener and worker thread functions */
 
 int FlexTransferEngine::startListener() {
     // Use findAvailableTcpPort to find an available port
@@ -614,204 +802,6 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
 err:
 
     for (auto pair : active_buffer_pairs) waitAllBuffersAvailable(pair);
-}
-
-int FlexTransferEngine::waitOneBufferAvailable(BufferPair *pair) {
-    // Check if any buffer is immediately available
-    for (int i = 0; i < 2; ++i) {
-        if (pair->buffers_user[i] == INVALID_BATCH) return i;
-    }
-
-    [[maybe_unused]] int rc;
-    transfer_status_t status;
-    while (true) {
-        for (int i = 0; i < 2; ++i) {
-            batch_id_t batch_id = pair->buffers_user[i];
-            rc = ::getTransferStatus(engine_, batch_id, 0, &status);
-            assert(rc == 0);
-            // TODO: error handling
-            if (status.status != STATUS_PENDING) {
-                // Buffer is now available (batch completed or errored)
-                ::freeBatchID(engine_, batch_id);
-                pair->buffers_user[i] = INVALID_BATCH;
-                return i;
-            }
-        }
-    }
-}
-
-void FlexTransferEngine::waitAllBuffersAvailable(BufferPair *pair) {
-    [[maybe_unused]] int rc;
-    transfer_status_t status;
-    for (int i = 0; i < 2; ++i) {
-        batch_id_t batch_id = pair->buffers_user[i];
-        if (batch_id == INVALID_BATCH) continue;
-        rc = ::getTransferStatus(engine_, batch_id, 0, &status);
-        assert(rc == 0);
-        // TODO: error handling
-        if (status.status != STATUS_PENDING) {
-            // Buffer is now available (batch completed or errored)
-            ::freeBatchID(engine_, batch_id);
-            pair->buffers_user[i] = INVALID_BATCH;
-        }
-    }
-}
-
-segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {
-    std::lock_guard<std::mutex> lock(segment_cache_mutex_);
-    auto it = segment_cache_.find(segment_name);
-    if (it != segment_cache_.end()) return it->second;
-
-    segment_id_t segment_id = ::openSegment(engine_, segment_name.c_str());
-    if (segment_id < 0) {
-        std::cerr << "Failed to open segment: " << segment_name << std::endl;
-        return -1;
-    }
-    segment_cache_[segment_name] = segment_id;
-    return segment_id;
-}
-
-// Require regions_mutex_ to be held before calling
-FlexTransferEngine::BufferPair *FlexTransferEngine::getBufferPair(
-    LocIdx loc_idx, size_t size) {
-    // Check if we have a suitable buffer pair
-    BufferPair *pair = buffer_pool_[loc_idx];
-    if (pair && pair->size >= size) return pair;
-
-    // No suitable buffer pair found or need larger size, allocate a new one
-    if (pair) freeBufferPair(pair);
-
-    const std::string &location = location_strings_[loc_idx];
-    pair = allocBufferPair(loc_idx, location, size);
-    buffer_pool_[loc_idx] = pair;
-
-    return pair;
-}
-
-// Require regions_mutex_ to be held before calling
-FlexTransferEngine::BufferPair *FlexTransferEngine::allocBufferPair(
-    LocIdx loc_idx, const std::string &location, size_t size) {
-    FlexTransferEngine::BufferPair *pair = new FlexTransferEngine::BufferPair();
-    pair->size = size;
-    pair->is_cuda = (location.find("cuda:") == 0);
-    pair->buffers_user[0] = INVALID_BATCH;
-    pair->buffers_user[1] = INVALID_BATCH;
-
-    // Allocate one contiguous buffer that's 2*size
-    size_t total_size = 2 * size;
-    if (pair->is_cuda) {
-#ifdef USE_CUDA
-        cudaError_t err = cudaMalloc(&pair->buffers[0], total_size);
-        if (err != cudaSuccess) {
-            std::cerr << "Failed to allocate GPU memory: "
-                      << cudaGetErrorString(err) << std::endl;
-            delete pair;
-            return nullptr;
-        }
-        // Split into two halves
-        pair->buffers[1] = static_cast<char *>(pair->buffers[0]) + size;
-#else
-        std::cerr << "GPU memory requested but CUDA support not compiled"
-                  << std::endl;
-        delete pair;
-        return nullptr;
-#endif
-    } else {
-        pair->buffers[0] = new char[total_size];
-        pair->buffers[1] = static_cast<char *>(pair->buffers[0]) + size;
-    }
-
-    // Register the entire contiguous buffer with RDMA
-    int ret = ::registerLocalMemory(engine_, pair->buffers[0], total_size,
-                                    location.c_str(), 1);
-    if (ret < 0) {
-        std::cerr << "Failed to register buffer with RDMA" << std::endl;
-        if (pair->is_cuda) {
-#ifdef USE_CUDA
-            cudaFree(pair->buffers[0]);
-#endif
-        } else {
-            delete[] static_cast<char *>(pair->buffers[0]);
-        }
-        delete pair;
-        return nullptr;
-    }
-
-    std::cerr << "Allocated buffer pair of size " << size << " for location "
-              << location << " (total=" << total_size << ")" << std::endl;
-    return pair;
-}
-
-// Require regions_mutex_ to be held before calling
-void FlexTransferEngine::freeBufferPair(BufferPair *pair) {
-    if (!pair) return;
-
-    ::unregisterLocalMemory(engine_, pair->buffers[0]);
-
-    if (pair->is_cuda) {
-#ifdef USE_CUDA
-        cudaFree(pair->buffers[0]);
-#endif
-    } else {
-        delete[] static_cast<char *>(pair->buffers[0]);
-    }
-
-    delete pair;
-}
-
-int FlexTransferEngine::copyMemory(void *dst, const void *src, size_t size,
-                                   bool is_cuda) {
-    if (is_cuda) {
-#ifdef USE_CUDA
-        cudaError_t err = cudaMemcpy(dst, src, size, cudaMemcpyDefault);
-        if (err != cudaSuccess) {
-            std::cerr << "cudaMemcpy failed: " << cudaGetErrorString(err)
-                      << std::endl;
-            return -1;
-        }
-        return 0;
-#else
-        std::cerr << "GPU memory copy requested but CUDA support not compiled"
-                  << std::endl;
-        return -1;
-#endif
-    } else {
-        memcpy(dst, src, size);
-        return 0;
-    }
-}
-
-FlexTransferEngine::MemoryRegion *FlexTransferEngine::getRegion(void *addr,
-                                                                size_t length) {
-    // fast path: the addr is the base of a registered region; we expect it to
-    // be a common case
-    auto it = copiable_regions_.find(addr);
-    if (it != copiable_regions_.end() && length <= it->second.length)
-        return &it->second;
-    // slow path: scan to find addr within a registered region; scan is
-    // acceptable because we don't expect to have too many regions
-    for (auto &[base_addr, region] : copiable_regions_) {
-        if (addr < static_cast<char *>(base_addr)) continue;
-        if (static_cast<char *>(addr) + length >
-            static_cast<char *>(base_addr) + region.length)
-            continue;
-        return &region;
-    }
-    return nullptr;
-}
-
-// Require regions_mutex_ to be held before calling
-FlexTransferEngine::LocIdx FlexTransferEngine::getLocIdx(
-    const std::string &location) {
-    // Linear search to find existing location
-    for (size_t i = 0; i < location_strings_.size(); ++i) {
-        if (location_strings_[i] == location) return static_cast<LocIdx>(i);
-    }
-    // Not found, add new location
-    LocIdx new_idx = static_cast<LocIdx>(location_strings_.size());
-    location_strings_.emplace_back(location);
-    buffer_pool_.emplace_back(nullptr);
-    return new_idx;
 }
 
 int FlexTransferEngine::connectToCopyEngine(const std::string &server_url) {

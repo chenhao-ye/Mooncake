@@ -41,12 +41,9 @@ int main(int argc, char **argv) {
         std::cerr << "Starting FlexTransferEngine with copy mode enabled..."
                   << std::endl;
 
-        FlexTransferEngine engine(true);  // enable_copy = true
-        int ret = engine.init(metadata_server, local_server_name);
-        if (ret < 0) {
-            std::cerr << "Failed to initialize FlexTransferEngine" << std::endl;
-            return 1;
-        }
+        FlexTransferEngine engine(metadata_server, local_server_name,
+                                  true,       // enable_copy = true
+                                  "cpu:0");   // ctrl_block_location
 
         std::cerr << "FlexTransferEngine initialized on copy server URL: "
                   << engine.getCopyServerUrl() << std::endl;
@@ -63,7 +60,7 @@ int main(int argc, char **argv) {
         memset(test_buffer, 0xAB, buffer_size);
 
         // Register the buffer
-        ret = engine.registerLocalMemory(test_buffer, buffer_size, "cpu", 1);
+        int ret = engine.registerLocalMemory(test_buffer, buffer_size, "cpu", 1);
         if (ret < 0) {
             std::cerr << "Failed to register test buffer" << std::endl;
             free(test_buffer);
@@ -87,12 +84,9 @@ int main(int argc, char **argv) {
         std::cerr << "Starting FlexTransferEngine in direct mode..."
                   << std::endl;
 
-        FlexTransferEngine engine(false);  // enable_copy = false
-        int ret = engine.init(metadata_server, local_server_name);
-        if (ret < 0) {
-            std::cerr << "Failed to initialize FlexTransferEngine" << std::endl;
-            return 1;
-        }
+        FlexTransferEngine engine(metadata_server, local_server_name,
+                                  false,      // enable_copy = false
+                                  "cpu:0");   // ctrl_block_location
 
         std::cerr << "FlexTransferEngine initialized" << std::endl;
 
@@ -110,7 +104,7 @@ int main(int argc, char **argv) {
         memset(local_buffer, 0, buffer_size);
 
         // Register local buffer
-        ret = engine.registerLocalMemory(local_buffer, buffer_size, "cpu", 1);
+        int ret = engine.registerLocalMemory(local_buffer, buffer_size, "cpu", 1);
         if (ret < 0) {
             std::cerr << "Failed to register local buffer" << std::endl;
             free(local_buffer);

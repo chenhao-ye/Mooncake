@@ -25,4 +25,4 @@ if (WITH_RUST_EXAMPLE)
 endif()
 
 # Flex Transfer Engine
-add_subdirectory(flex_transfer)
+add_subdirectory(flex_transfer_engine)

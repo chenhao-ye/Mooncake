@@ -1,5 +1,7 @@
 #include "batch.h"
 
+#include <atomic>
+
 #include "flex_transfer_engine.h"
 
 FlexBatch::~FlexBatch() {
@@ -35,6 +37,9 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy) {
         if (batch_id_ == INVALID_BATCH) return -1;
 
         auto target_segment_id = engine_->getSegmentId(target);
+        if (target_segment_id < 0)
+            throw std::runtime_error("Failed to get segment ID for segment: " +
+                                     target);
         for (auto &entry : entries_) entry.target_id = target_segment_id;
         return ::submitTransfer(engine_->getEngine(), batch_id_,
                                 entries_.data(), entries_.size());
@@ -53,7 +58,8 @@ int FlexBatch::getTransferStatus(size_t task_id, transfer_status_t &status) {
     }
 
     // for copy-based transfers, check ctrl_block progress
-    int64_t progress = copy_ctrl_block_->progress_counter;
+    int64_t progress =
+        copy_ctrl_block_->progress_counter.load(std::memory_order_acquire);
     if (static_cast<int64_t>(task_id) < progress) {  // Task completed
         status.status = STATUS_COMPLETED;
         status.transferred_bytes = entries_[task_id].length;

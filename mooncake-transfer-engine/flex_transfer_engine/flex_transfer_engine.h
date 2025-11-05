@@ -148,7 +148,7 @@ class FlexTransferEngine {
 
     int waitOneBufferAvailable(BufferPair *pair);
 
-    void waitAllBuffersAvailable(BufferPair *pair);
+    int waitAllBuffersAvailable(BufferPair *pair);
 
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 

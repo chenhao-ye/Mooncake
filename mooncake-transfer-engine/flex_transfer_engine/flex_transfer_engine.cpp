@@ -206,10 +206,7 @@ segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {
     if (it != segment_cache_.end()) return it->second;
 
     segment_id_t segment_id = ::openSegment(engine_, segment_name.c_str());
-    if (segment_id < 0) {
-        std::cerr << "Failed to open segment: " << segment_name << std::endl;
-        return -1;
-    }
+    if (segment_id < 0) return segment_id;  // error
     segment_cache_[segment_name] = segment_id;
     return segment_id;
 }
@@ -399,21 +396,24 @@ int FlexTransferEngine::waitOneBufferAvailable(BufferPair *pair) {
     }
 }
 
-void FlexTransferEngine::waitAllBuffersAvailable(BufferPair *pair) {
-    [[maybe_unused]] int rc;
+int FlexTransferEngine::waitAllBuffersAvailable(BufferPair *pair) {
+    int rc = 0;
     transfer_status_t status;
     for (int i = 0; i < 2; ++i) {
         batch_id_t batch_id = pair->buffers_user[i];
         if (batch_id == INVALID_BATCH) continue;
-        rc = ::getTransferStatus(engine_, batch_id, 0, &status);
-        assert(rc == 0);
-        // TODO: error handling
+        [[maybe_unused]] int stat_rc =
+            ::getTransferStatus(engine_, batch_id, 0, &status);
+        assert(stat_rc == 0);  // only happens for invalid argument
         if (status.status != STATUS_PENDING) {
+            // if notice any failure, set rc = -1
+            if (status.status != STATUS_COMPLETED) rc = -1;
             // Buffer is now available (batch completed or errored)
             ::freeBatchID(engine_, batch_id);
             pair->buffers_user[i] = INVALID_BATCH;
         }
     }
+    return rc;
 }
 
 // Require regions_mutex_ to be held before calling
@@ -699,6 +699,12 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         requests.push_back(req);
     }
 
+    CopyCtrlBlock *copy_ctrl_block = acquireCopyCtrlBlock();
+    if (!copy_ctrl_block) {
+        std::cerr << "Failed to acquire CopyCtrlBlock" << std::endl;
+        return;
+    }
+
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
 
     // these buffer pairs are used when processing this request; when processing
@@ -730,7 +736,7 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         if (rc) {
             std::cerr << "Failed to copy memory from " << source_addr
                       << " to buffer " << buffer << std::endl;
-            return;
+            goto err;
         }
 
         // Submit RDMA write from buffer to remote target
@@ -746,7 +752,7 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         if (submit_ret < 0) {
             std::cerr << "Failed to submit RDMA write" << std::endl;
             ::freeBatchID(engine_, batch_id);
-            return;
+            goto err;
         }
 
         buffer_pair->buffers_user[buffer_idx] = batch_id;
@@ -756,11 +762,12 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
 
     // Update progress to indicate completion
     {
-        int64_t completion_val = requests.size();
+        copy_ctrl_block->progress_counter.store(requests.size(),
+                                                std::memory_order_release);
         batch_id_t batch_id = ::allocateBatchID(engine_, 1);
         transfer_request_t progress_req;
         progress_req.opcode = OPCODE_WRITE;
-        progress_req.source = &completion_val;
+        progress_req.source = (void *)&(copy_ctrl_block->progress_counter);
         progress_req.target_id = target_segment_id;
         progress_req.target_offset = reinterpret_cast<uint64_t>(progress_addr);
         progress_req.length = sizeof(int64_t);

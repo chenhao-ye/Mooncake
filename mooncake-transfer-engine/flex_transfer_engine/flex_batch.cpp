@@ -4,8 +4,10 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cassert>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 
 #include "flex_transfer_engine.h"
 #include "transfer_engine_c.h"
@@ -85,18 +87,22 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy) {
     // else: copy-based transfer
     copy_ctrl_block_ = engine_->acquireCopyCtrlBlock();
     if (!copy_ctrl_block_) return -1;
-    return engine_->submitTransferToCopyServer(entries_, target,
-                                               copy_ctrl_block_, &client_conn_);
+    client_conn_ =
+        engine_->submitTransferToCopyServer(entries_, target, copy_ctrl_block_);
+    return 0;
 }
 
-int FlexBatch::getTransferStatus(size_t task_id, transfer_status_t &status) {
+int FlexBatch::getTransferStatus(size_t task_id) {
     if (!copy_ctrl_block_) {  // Direct RDMA transfer
-        return ::getTransferStatus(engine_->getEngine(), batch_id_, task_id,
-                                   &status);
+        transfer_status_t status;
+        int rc = ::getTransferStatus(engine_->getEngine(), batch_id_, task_id,
+                                     &status);
+        if (rc) throw std::runtime_error("Fail to get transfer status");
+        return status.status;
     }
 
     // For copy-based transfers, check ctrl_block progress
-    if (!client_conn_) return -1;
+    assert(client_conn_);
 
     int64_t progress;
 
@@ -111,7 +117,7 @@ int FlexBatch::getTransferStatus(size_t task_id, transfer_status_t &status) {
         // If progress hasn't changed, check the socket for finalized value
         if (progress == client_conn_->last_progress) {
             int rc = checkFinalizedProgress(client_conn_);
-            if (rc < 0) return rc;  // Error occurred
+            if (rc < 0) return STATUS_FAILED;  // Error occurred
 
             // If finalized value was received, use it
             if (client_conn_->finalized_received)
@@ -123,13 +129,10 @@ int FlexBatch::getTransferStatus(size_t task_id, transfer_status_t &status) {
 
     // Determine task status based on progress
     if (static_cast<int64_t>(task_id) < progress) {  // Task completed
-        status.status = STATUS_COMPLETED;
-        status.transferred_bytes = entries_[task_id].length;
+        return STATUS_COMPLETED;
     } else {
         // if already finalized, the given task will never complete
-        status.status =
-            client_conn_->finalized_received ? STATUS_FAILED : STATUS_WAITING;
-        status.transferred_bytes = 0;
+        return client_conn_->finalized_received ? STATUS_FAILED
+                                                : STATUS_WAITING;
     }
-    return 0;
 }

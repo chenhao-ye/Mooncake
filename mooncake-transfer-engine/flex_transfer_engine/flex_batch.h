@@ -49,9 +49,8 @@ class FlexBatch {
      * For copy-based transfers, this automatically checks the socket for
      * finalized progress if the progress counter hasn't changed.
      * @param task_id The task ID within this batch
-     * @param status Output parameter for transfer status
      */
-    int getTransferStatus(size_t task_id, transfer_status_t &status);
+    int getTransferStatus(size_t task_id);
 
    private:
     std::shared_ptr<FlexTransferEngine> engine_;

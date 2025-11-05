@@ -40,12 +40,11 @@ class CopyClient {
      * @param entries Vector of transfer requests
      * @param server_url URL of remote CopyServer in format "ip:port"
      * @param ctrl_block Control block for progress tracking
-     * @param out_conn Output parameter for connection pointer (optional)
+     * @return connection pointer
      */
-    void submitTransferToCopyServer(std::vector<transfer_request_t> &entries,
-                                    const std::string &server_url,
-                                    CopyCtrlBlock *ctrl_block,
-                                    ClientConnection **out_conn);
+    ClientConnection *submitTransferToCopyServer(
+        std::vector<transfer_request_t> &entries, const std::string &server_url,
+        CopyCtrlBlock *ctrl_block);
 
    private:
     /**

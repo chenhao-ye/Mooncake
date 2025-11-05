@@ -114,13 +114,11 @@ class FlexTransferEngine {
     void releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block);
 
     // Delegate to CopyClient
-    int submitTransferToCopyServer(std::vector<transfer_request_t> &entries,
-                                   const std::string &server_url,
-                                   CopyCtrlBlock *ctrl_block,
-                                   ClientConnection **out_conn) {
-        copy_client_.submitTransferToCopyServer(entries, server_url, ctrl_block,
-                                                out_conn);
-        return 0;
+    ClientConnection *submitTransferToCopyServer(
+        std::vector<transfer_request_t> &entries, const std::string &server_url,
+        CopyCtrlBlock *ctrl_block) {
+        return copy_client_.submitTransferToCopyServer(entries, server_url,
+                                                       ctrl_block);
     }
 
    private:

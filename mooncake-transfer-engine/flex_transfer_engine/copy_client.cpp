@@ -18,10 +18,9 @@ CopyClient::~CopyClient() {
     for (const auto &[_, conn] : copy_server_connections_) close(conn.fd);
 }
 
-void CopyClient::submitTransferToCopyServer(
+ClientConnection *CopyClient::submitTransferToCopyServer(
     std::vector<transfer_request_t> &entries, const std::string &server_url,
-    CopyCtrlBlock *ctrl_block, ClientConnection **out_conn) {
-    if (entries.empty()) return;
+    CopyCtrlBlock *ctrl_block) {
     assert(ctrl_block);
 
     // Connect to the remote CopyServer (or reuse existing connection)
@@ -46,9 +45,6 @@ void CopyClient::submitTransferToCopyServer(
             conn = &result.first->second;
         }
     }
-
-    // Return connection pointer if requested
-    if (out_conn) *out_conn = conn;
 
     // Send protocol to remote CopyServer:
     // 1. Segment name length (4 bytes)
@@ -118,6 +114,7 @@ void CopyClient::submitTransferToCopyServer(
 
     std::cerr << "Submitted " << entries.size() << " requests to CopyServer at "
               << server_url << std::endl;
+    return conn;
 }
 
 int CopyClient::connectToCopyServer(const std::string &server_url) {

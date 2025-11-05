@@ -29,7 +29,7 @@ class CopyServer {
     int unregisterLocalMemory(void *addr);
     int registerLocalMemoryBatch(std::vector<buffer_entry_t> &buffer_list,
                                  const std::string &location);
-    int unregisterLocalMemoryBatch(std::vector<void *> &addr_list);
+    int unregisterLocalMemoryBatch(std::vector<uintptr_t> &addr_list);
 
     // Start/stop the TCP listener
     void startListener();

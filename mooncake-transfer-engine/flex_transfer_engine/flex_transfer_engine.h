@@ -12,6 +12,7 @@
 
 #include "copy_client.h"
 #include "copy_server.h"
+#include "flex_batch.h"
 #include "transfer_engine.h"
 #include "transfer_engine_c.h"
 
@@ -58,7 +59,7 @@ class FlexTransferEngine {
      * @param force_direct If true, forces RDMA registration even when
      * enable_copy_ is true
      */
-    int registerLocalMemory(void *addr, size_t length,
+    int registerLocalMemory(uintptr_t addr, size_t length,
                             const std::string &location, int remote_accessible,
                             bool force_direct = false);
 
@@ -67,7 +68,7 @@ class FlexTransferEngine {
      * @param force_direct If true, forces RDMA unregistration even when
      * enable_copy_ is true
      */
-    int unregisterLocalMemory(void *addr, bool force_direct = false);
+    int unregisterLocalMemory(uintptr_t addr, bool force_direct = false);
 
     /**
      * Register a batch of local memory buffers.
@@ -78,12 +79,21 @@ class FlexTransferEngine {
                                  const std::string &location,
                                  bool force_direct = false);
 
+    int registerLocalMemoryBatch(MemoryBatch &memory_batch,
+                                 bool force_direct = false) {
+        for (auto &[location, buffers] : memory_batch.location_buffers_map) {
+            int rc = registerLocalMemoryBatch(buffers, location, force_direct);
+            if (rc) return rc;
+        }
+        return 0;
+    }
+
     /**
      * Unregister a batch of local memory buffers.
      * @param force_direct If true, forces RDMA unregistration even when
      * enable_copy_ is true
      */
-    int unregisterLocalMemoryBatch(std::vector<void *> &addr_list,
+    int unregisterLocalMemoryBatch(std::vector<uintptr_t> &addr_list,
                                    bool force_direct = false);
 
     /**

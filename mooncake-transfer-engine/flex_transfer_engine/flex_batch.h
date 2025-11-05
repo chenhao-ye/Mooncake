@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "transfer_engine_c.h"
@@ -68,4 +69,14 @@ class FlexBatch {
     // set client_conn_ to nullptr
     ClientConnection *client_conn_;
     int64_t last_progress_;
+};
+
+struct MemoryBatch {
+    std::unordered_map<std::string, std::vector<buffer_entry_t>>
+        location_buffers_map;
+
+    void add(void *addr, size_t length, const std::string &location) {
+        location_buffers_map[location].emplace_back(
+            buffer_entry_t{addr, length});
+    };
 };

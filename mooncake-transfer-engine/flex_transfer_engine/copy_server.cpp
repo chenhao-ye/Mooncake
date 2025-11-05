@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <sstream>
@@ -94,11 +95,11 @@ err:
     return -1;
 }
 
-int CopyServer::unregisterLocalMemoryBatch(std::vector<void *> &addr_list) {
+int CopyServer::unregisterLocalMemoryBatch(std::vector<uintptr_t> &addr_list) {
     int rc = 0;
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
-    for (void *addr : addr_list) {
-        auto it = copiable_regions_.find(addr);
+    for (uintptr_t addr : addr_list) {
+        auto it = copiable_regions_.find(reinterpret_cast<void *>(addr));
         if (it != copiable_regions_.end()) {
             copiable_regions_.erase(it);
         } else {

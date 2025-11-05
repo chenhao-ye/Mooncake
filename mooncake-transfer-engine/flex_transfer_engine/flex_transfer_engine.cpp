@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <sstream>
@@ -71,24 +72,28 @@ FlexTransferEngine::~FlexTransferEngine() {
     ::destroyTransferEngine(engine_);
 }
 
-int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
+int FlexTransferEngine::registerLocalMemory(uintptr_t addr, size_t length,
                                             const std::string &location,
                                             int remote_accessible,
                                             bool force_direct) {
     // do actual RDMA registration
     if (force_direct || !enable_copy_) {
-        return ::registerLocalMemory(engine_, addr, length, location.c_str(),
+        return ::registerLocalMemory(engine_, reinterpret_cast<void *>(addr),
+                                     length, location.c_str(),
                                      remote_accessible);
     } else {  // register for copy-based transfer
-        return copy_server_.registerLocalMemory(addr, length, location);
+        return copy_server_.registerLocalMemory(reinterpret_cast<void *>(addr),
+                                                length, location);
     }
 }
 
-int FlexTransferEngine::unregisterLocalMemory(void *addr, bool force_direct) {
+int FlexTransferEngine::unregisterLocalMemory(uintptr_t addr,
+                                              bool force_direct) {
     if (force_direct || !enable_copy_) {
-        return ::unregisterLocalMemory(engine_, addr);
+        return ::unregisterLocalMemory(engine_, reinterpret_cast<void *>(addr));
     } else {
-        return copy_server_.unregisterLocalMemory(addr);
+        return copy_server_.unregisterLocalMemory(
+            reinterpret_cast<void *>(addr));
     }
 }
 
@@ -104,10 +109,11 @@ int FlexTransferEngine::registerLocalMemoryBatch(
 }
 
 int FlexTransferEngine::unregisterLocalMemoryBatch(
-    std::vector<void *> &addr_list, bool force_direct) {
+    std::vector<uintptr_t> &addr_list, bool force_direct) {
     if (force_direct || !enable_copy_) {
-        return ::unregisterLocalMemoryBatch(engine_, addr_list.data(),
-                                            addr_list.size());
+        return ::unregisterLocalMemoryBatch(
+            engine_, reinterpret_cast<void **>(addr_list.data()),
+            addr_list.size());
     } else {
         return copy_server_.unregisterLocalMemoryBatch(addr_list);
     }

@@ -85,7 +85,7 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy) {
     // else: copy-based transfer
     copy_ctrl_block_ = engine_->acquireCopyCtrlBlock();
     if (!copy_ctrl_block_) return -1;
-    return engine_->submitTransferToCopyEngine(entries_, target,
+    return engine_->submitTransferToCopyServer(entries_, target,
                                                copy_ctrl_block_, &client_conn_);
 }
 

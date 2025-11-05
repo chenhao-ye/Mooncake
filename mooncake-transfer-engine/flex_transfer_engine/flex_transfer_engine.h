@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "copy_client.h"
 #include "copy_server.h"
 #include "transfer_engine.h"
 #include "transfer_engine_c.h"
@@ -19,20 +20,6 @@ class FlexTransferEngine;
 
 struct CopyCtrlBlock {
     volatile std::atomic_int64_t progress_counter = 0;
-};
-
-// Client-side connection state (combines fd + progress tracking)
-struct ClientConnection {
-    int fd;
-    int64_t last_progress;
-    bool finalized_received;
-    int32_t finalized_value;
-
-    ClientConnection(int fd)
-        : fd(fd),
-          last_progress(0),
-          finalized_received(false),
-          finalized_value(0) {}
 };
 
 /**
@@ -117,20 +104,25 @@ class FlexTransferEngine {
     // for CopyServer and FlexBatch
     transfer_engine_t getEngine() { return engine_; }
 
+    // for CopyClient
+    const std::string &getLocalServerName() const { return local_server_name_; }
+
     segment_id_t getSegmentId(const std::string &segment_name);
 
     CopyCtrlBlock *acquireCopyCtrlBlock();
 
     void releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block);
 
-    int submitTransferToCopyEngine(std::vector<transfer_request_t> &entries,
+    // Delegate to CopyClient
+    int submitTransferToCopyServer(std::vector<transfer_request_t> &entries,
                                    const std::string &server_url,
                                    CopyCtrlBlock *ctrl_block,
-                                   ClientConnection **out_conn);
+                                   ClientConnection **out_conn) {
+        return copy_client_.submitTransferToCopyServer(entries, server_url,
+                                                       ctrl_block, out_conn);
+    }
 
    private:
-    int connectToCopyEngine(const std::string &server_url);
-
     std::string local_server_name_;
     const bool enable_copy_;  // Whether to enable copy-based transfer
     const std::string ctrl_block_location_;
@@ -143,15 +135,13 @@ class FlexTransferEngine {
     std::unordered_map<std::string, segment_id_t> segment_cache_;
     std::mutex segment_cache_mutex_;
 
-    // TCP listener and worker (only used when enable_copy is true)
-    CopyServer copy_server_;
-
-    // Client-side: TCP connections to remote FlexTransferEngine (server_url ->
-    // connection)
-    std::unordered_map<std::string, ClientConnection> copy_engine_connections_;
-    std::mutex connections_mutex_;
-
     // Cache of CopyCtrlBlock objects for copy-based transfers
     std::vector<CopyCtrlBlock *> copy_ctrl_block_cache_;
     std::mutex ctrl_block_mutex_;
+
+    // TCP listener and worker (only used when enable_copy is true)
+    CopyServer copy_server_;
+
+    // Client when talking to a copy_server
+    CopyClient copy_client_;
 };

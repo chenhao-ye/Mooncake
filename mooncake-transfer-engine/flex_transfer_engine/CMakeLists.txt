@@ -2,6 +2,7 @@
 
 # Collect source files
 set(FLEX_TRANSFER_SOURCES
+    copy_client.cpp
     copy_server.cpp
     flex_batch.cpp
     flex_transfer_engine.cpp

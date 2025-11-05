@@ -2,8 +2,9 @@
 
 # Collect source files
 set(FLEX_TRANSFER_SOURCES
-    flex_transfer_engine.cpp
+    copy_server.cpp
     flex_batch.cpp
+    flex_transfer_engine.cpp
 )
 
 # Create the flex transfer engine library

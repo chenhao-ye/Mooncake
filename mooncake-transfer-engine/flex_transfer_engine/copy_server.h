@@ -140,5 +140,16 @@ class CopyServer {
 
     void workerThread();
 
-    void handleAndProcessRequest(int client_fd);
+    void processRequest(int client_fd);
+
+    // read segment name from fd and write into segment_name
+    int readSegmentName(int client_fd, std::string &segment_name);
+
+    // read requests from fd and write into tasks
+    int readTasks(int client_fd, uint64_t &target_progress_addr,
+                  std::vector<Task> &tasks);
+
+    // execute the task specified by task_idx
+    int executeTask(std::vector<Task> tasks, size_t task_idx,
+                    int target_segment_id);
 };

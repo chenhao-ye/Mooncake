@@ -236,9 +236,22 @@ void CopyServer::workerThread() {
 
 void CopyServer::handleAndProcessRequest(int client_fd) {
     int32_t num_completed = 0;
+    std::vector<Task> tasks;
+    CopyCtrlBlock *copy_ctrl_block = nullptr;
 
-    // Read segment name length
+    // local variables as network buffers
     uint32_t segment_name_len;
+    std::string segment_name;
+
+    struct BatchInfo {
+        uint64_t progress_addr;
+        uint64_t num_requests;
+    };
+
+    BatchInfo batch_info;
+    segment_id_t target_segment_id;
+
+    // read segment name length
     if (readFully(client_fd, &segment_name_len, sizeof(segment_name_len)) !=
         sizeof(segment_name_len)) {
         std::cerr << "Failed to read segment name length" << std::endl;
@@ -252,196 +265,171 @@ void CopyServer::handleAndProcessRequest(int client_fd) {
         goto cleanup;
     }
 
-    {
-        // Read segment name
-        std::string segment_name(segment_name_len + 1, '\0');
-        if (readFully(client_fd, segment_name.data(), segment_name_len) !=
-            segment_name_len) {
-            std::cerr << "Failed to read segment name" << std::endl;
-            goto cleanup;
-        }
-
-        std::cerr << "Received request for segment: " << segment_name
-                  << std::endl;
-
-        // Get or open segment
-        segment_id_t target_segment_id = engine_.getSegmentId(segment_name);
-        if (target_segment_id < 0) {
-            std::cerr << "Failed to open segment: " << segment_name
-                      << std::endl;
-            goto cleanup;
-        }
-
-        // Read batch info
-        struct BatchInfo {
-            uint64_t progress_addr;
-            uint64_t num_requests;
-        };
-
-        BatchInfo batch_info;
-        if (readFully(client_fd, &batch_info, sizeof(batch_info)) !=
-            sizeof(batch_info)) {
-            std::cerr << "Failed to read batch info" << std::endl;
-            goto cleanup;
-        }
-
-        std::cerr << "Received transfer request: progress_addr=0x" << std::hex
-                  << batch_info.progress_addr << std::dec
-                  << ", num_requests=" << batch_info.num_requests << std::endl;
-
-        // Read request details and convert them into tasks
-        std::vector<Task> tasks;
-
-        for (uint64_t i = 0; i < batch_info.num_requests; ++i) {
-            struct RequestInfo {
-                uint64_t source_addr;
-                uint64_t target_addr;
-                uint64_t length;
-            };
-
-            RequestInfo req_info;
-            if (readFully(client_fd, &req_info, sizeof(req_info)) !=
-                sizeof(req_info)) {
-                std::cerr << "Failed to read request info" << std::endl;
-                goto cleanup;
-            }
-            tasks.emplace_back(reinterpret_cast<void *>(req_info.source_addr),
-                               req_info.target_addr, req_info.length);
-        }
-
-        CopyCtrlBlock *copy_ctrl_block = engine_.acquireCopyCtrlBlock();
-        if (!copy_ctrl_block) {
-            std::cerr << "Failed to acquire CopyCtrlBlock" << std::endl;
-            goto cleanup;
-        }
-
-        {
-            std::lock_guard<std::mutex> regions_lock(regions_mutex_);
-
-            for (size_t i = 0; i < tasks.size(); ++i) {
-                Task &task = tasks[i];
-
-                // delayed source address validation:
-                // if source_addr is invalid, will be detected here
-                MemoryRegion *region = getRegion(task.source_addr, task.length);
-                if (!region) {
-                    std::cerr << "Source address " << task.source_addr
-                              << " not in registered copiable regions"
-                              << std::endl;
-                    goto err;
-                }
-
-                // Get a buffer pair for this location
-                BufferPair &buffer_pair = getBufferPair(region->loc_idx);
-                assert(buffer_pair.size >= task.length);
-
-                int buffer_idx = buffer_pair.selectNextBuffer();
-                int buffer_used_by_task_idx = buffer_pair.users[buffer_idx];
-                if (buffer_used_by_task_idx >= 0) {
-                    int rc = waitTask(tasks[buffer_used_by_task_idx]);
-                    if (rc) {
-                        std::cerr
-                            << "Failed to wait for previous task on buffer "
-                            << buffer_idx << std::endl;
-                        goto err;
-                    }
-                }
-
-                void *buffer = buffer_pair.buffers[buffer_idx];
-
-                // Copy data from source to buffer
-                int rc = copyMemory(buffer, task.source_addr, task.length,
-                                    buffer_pair.is_cuda);
-                if (rc) {
-                    std::cerr << "Failed to copy memory from "
-                              << task.source_addr << " to buffer " << buffer
-                              << std::endl;
-                    goto err;
-                }
-
-                // Submit RDMA write from buffer to remote target
-                batch_id_t batch_id = ::allocateBatchID(engine_.getEngine(), 1);
-                transfer_request_t write_req = {
-                    .opcode = OPCODE_WRITE,
-                    .source = buffer,
-                    .target_id = target_segment_id,
-                    .target_offset = task.target_addr,
-                    .length = task.length,
-                };
-
-                int submit_rc = ::submitTransfer(engine_.getEngine(), batch_id,
-                                                 &write_req, 1);
-                if (submit_rc < 0) {
-                    std::cerr << "Failed to submit RDMA write" << std::endl;
-                    ::freeBatchID(engine_.getEngine(), batch_id);
-                    goto err;
-                }
-
-                task.batch_id = batch_id;
-                task.buffer_pair = &buffer_pair;
-                task.buffer_idx = buffer_idx;
-            }
-
-            for (auto &task : tasks) {
-                int rc = waitTask(task);
-                if (rc) {
-                    std::cerr << "Failed to wait for task completion"
-                              << std::endl;
-                    goto err;
-                }
-                num_completed++;
-            }
-
-            /**
-             Ordering guarantee: progress counter update must be finished before
-             return any value from the socket. In other words, once received a
-             int32_t from the socket, the client can safely assume there will be
-             no more update to the progress counter.
-             */
-
-            // Update progress to indicate completion via RDMA
-            {
-                copy_ctrl_block->progress_counter.store(
-                    num_completed, std::memory_order_release);
-                batch_id_t batch_id = ::allocateBatchID(engine_.getEngine(), 1);
-                transfer_request_t progress_req = {
-                    .opcode = OPCODE_WRITE,
-                    .source = (void *)&(copy_ctrl_block->progress_counter),
-                    .target_id = target_segment_id,
-                    .target_offset =
-                        reinterpret_cast<uint64_t>(batch_info.progress_addr),
-                    .length = sizeof(int64_t),
-                };
-                ::submitTransfer(engine_.getEngine(), batch_id, &progress_req,
-                                 1);
-
-                // Wait for completion
-                transfer_status_t status;
-                while (::getTransferStatus(engine_.getEngine(), batch_id, 0,
-                                           &status) == 0 &&
-                       status.status != STATUS_COMPLETED) {
-                    usleep(1);
-                }
-                ::freeBatchID(engine_.getEngine(), batch_id);
-
-                std::cerr << "Completed transfer request: " << num_completed
-                          << " tasks" << std::endl;
-            }
-
-        err:
-            // Clean up any pending tasks
-            for (auto &task : tasks) {
-                int rc = waitTask(task);
-                if (rc)
-                    std::cerr << "Failed to wait for task completion"
-                              << std::endl;
-            }
-        }
-
-        engine_.releaseCopyCtrlBlock(copy_ctrl_block);
+    // read segment name
+    segment_name.resize(segment_name_len + 1);
+    if (readFully(client_fd, segment_name.data(), segment_name_len) !=
+        segment_name_len) {
+        std::cerr << "Failed to read segment name" << std::endl;
+        goto cleanup;
     }
 
+    std::cerr << "Received request for segment: " << segment_name << std::endl;
+
+    // read batch info
+    if (readFully(client_fd, &batch_info, sizeof(batch_info)) !=
+        sizeof(batch_info)) {
+        std::cerr << "Failed to read batch info" << std::endl;
+        goto cleanup;
+    }
+
+    std::cerr << "Received transfer request: progress_addr=0x" << std::hex
+              << batch_info.progress_addr << std::dec
+              << ", num_requests=" << batch_info.num_requests << std::endl;
+
+    for (uint64_t i = 0; i < batch_info.num_requests; ++i) {
+        struct RequestInfo {
+            uint64_t source_addr;
+            uint64_t target_addr;
+            uint64_t length;
+        };
+
+        RequestInfo req_info;
+        if (readFully(client_fd, &req_info, sizeof(req_info)) !=
+            sizeof(req_info)) {
+            std::cerr << "Failed to read request info" << std::endl;
+            goto cleanup;
+        }
+        tasks.emplace_back(reinterpret_cast<void *>(req_info.source_addr),
+                           req_info.target_addr, req_info.length);
+    }
+
+    target_segment_id = engine_.getSegmentId(segment_name);
+    if (target_segment_id < 0) {
+        std::cerr << "Failed to open segment: " << segment_name << std::endl;
+        goto cleanup;
+    }
+
+    copy_ctrl_block = engine_.acquireCopyCtrlBlock();
+    if (!copy_ctrl_block) {
+        std::cerr << "Failed to acquire CopyCtrlBlock" << std::endl;
+        goto cleanup;
+    }
+
+    {
+        std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+
+        for (size_t i = 0; i < tasks.size(); ++i) {
+            Task &task = tasks[i];
+
+            // delayed source address validation:
+            // if source_addr is invalid, will be detected here
+            MemoryRegion *region = getRegion(task.source_addr, task.length);
+            if (!region) {
+                std::cerr << "Source address " << task.source_addr
+                          << " not in registered copiable regions" << std::endl;
+                goto cleanup;
+            }
+
+            // Get a buffer pair for this location
+            BufferPair &buffer_pair = getBufferPair(region->loc_idx);
+            assert(buffer_pair.size >= task.length);
+
+            int buffer_idx = buffer_pair.selectNextBuffer();
+            int buffer_used_by_task_idx = buffer_pair.users[buffer_idx];
+            if (buffer_used_by_task_idx >= 0) {
+                int rc = waitTask(tasks[buffer_used_by_task_idx]);
+                if (rc) {
+                    std::cerr << "Failed to wait for previous task on buffer "
+                              << buffer_idx << std::endl;
+                    goto cleanup;
+                }
+            }
+
+            void *buffer = buffer_pair.buffers[buffer_idx];
+
+            // Copy data from source to buffer
+            int rc = copyMemory(buffer, task.source_addr, task.length,
+                                buffer_pair.is_cuda);
+            if (rc) {
+                std::cerr << "Failed to copy memory from " << task.source_addr
+                          << " to buffer " << buffer << std::endl;
+                goto cleanup;
+            }
+
+            // Submit RDMA write from buffer to remote target
+            batch_id_t batch_id = ::allocateBatchID(engine_.getEngine(), 1);
+            transfer_request_t write_req = {
+                .opcode = OPCODE_WRITE,
+                .source = buffer,
+                .target_id = target_segment_id,
+                .target_offset = task.target_addr,
+                .length = task.length,
+            };
+
+            int submit_rc =
+                ::submitTransfer(engine_.getEngine(), batch_id, &write_req, 1);
+            if (submit_rc < 0) {
+                std::cerr << "Failed to submit RDMA write" << std::endl;
+                ::freeBatchID(engine_.getEngine(), batch_id);
+                goto cleanup;
+            }
+
+            task.batch_id = batch_id;
+            task.buffer_pair = &buffer_pair;
+            task.buffer_idx = buffer_idx;
+        }
+
+        for (auto &task : tasks) {
+            int rc = waitTask(task);
+            if (rc) {
+                std::cerr << "Failed to wait for task completion" << std::endl;
+                goto cleanup;
+            }
+            num_completed++;
+        }
+    }
+    /**
+     Ordering guarantee: progress counter update must be finished before
+     return any value from the socket. In other words, once received a
+     int32_t from the socket, the client can safely assume there will be
+     no more update to the progress counter.
+     */
+
+    {  // Update progress to indicate completion via RDMA
+        copy_ctrl_block->progress_counter.store(num_completed,
+                                                std::memory_order_release);
+        batch_id_t batch_id = ::allocateBatchID(engine_.getEngine(), 1);
+        transfer_request_t progress_req = {
+            .opcode = OPCODE_WRITE,
+            .source = (void *)&(copy_ctrl_block->progress_counter),
+            .target_id = target_segment_id,
+            .target_offset =
+                reinterpret_cast<uint64_t>(batch_info.progress_addr),
+            .length = sizeof(int64_t),
+        };
+        ::submitTransfer(engine_.getEngine(), batch_id, &progress_req, 1);
+
+        // Wait for completion
+        transfer_status_t status;
+        while (::getTransferStatus(engine_.getEngine(), batch_id, 0, &status) ==
+                   0 &&
+               status.status != STATUS_COMPLETED) {
+            usleep(1);
+        }
+        ::freeBatchID(engine_.getEngine(), batch_id);
+    }
+
+    std::cerr << "Completed transfer request: " << num_completed << " tasks"
+              << std::endl;
+
 cleanup:
+    // Clean up any pending tasks
+    for (auto &task : tasks) {
+        int rc = waitTask(task);
+        if (rc) std::cerr << "Failed to wait for task completion" << std::endl;
+    }
+
+    if (copy_ctrl_block) engine_.releaseCopyCtrlBlock(copy_ctrl_block);
     // Send completion count via socket (0 or negative on error)
     if (writeFully(client_fd, &num_completed, sizeof(num_completed)) !=
         sizeof(num_completed)) {

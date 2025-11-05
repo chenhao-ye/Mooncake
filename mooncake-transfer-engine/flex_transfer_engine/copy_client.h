@@ -41,18 +41,17 @@ class CopyClient {
      * @param server_url URL of remote CopyServer in format "ip:port"
      * @param ctrl_block Control block for progress tracking
      * @param out_conn Output parameter for connection pointer (optional)
-     * @return 0 on success, -1 on error
      */
-    int submitTransferToCopyServer(std::vector<transfer_request_t> &entries,
-                                   const std::string &server_url,
-                                   CopyCtrlBlock *ctrl_block,
-                                   ClientConnection **out_conn);
+    void submitTransferToCopyServer(std::vector<transfer_request_t> &entries,
+                                    const std::string &server_url,
+                                    CopyCtrlBlock *ctrl_block,
+                                    ClientConnection **out_conn);
 
    private:
     /**
      * Connect to a remote CopyServer.
      * @param server_url URL in format "ip:port"
-     * @return File descriptor on success, -1 on error
+     * @return File descriptor
      */
     int connectToCopyServer(const std::string &server_url);
 

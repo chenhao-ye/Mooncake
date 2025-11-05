@@ -18,10 +18,10 @@ CopyClient::~CopyClient() {
     for (const auto &[_, conn] : copy_server_connections_) close(conn.fd);
 }
 
-int CopyClient::submitTransferToCopyServer(
+void CopyClient::submitTransferToCopyServer(
     std::vector<transfer_request_t> &entries, const std::string &server_url,
     CopyCtrlBlock *ctrl_block, ClientConnection **out_conn) {
-    if (entries.empty()) return 0;
+    if (entries.empty()) return;
     assert(ctrl_block);
 
     // Connect to the remote CopyServer (or reuse existing connection)
@@ -40,11 +40,6 @@ int CopyClient::submitTransferToCopyServer(
             conn->finalized_value = 0;
         } else {
             fd = connectToCopyServer(server_url);
-            if (fd < 0) {
-                std::cerr << "Failed to connect to CopyServer at " << server_url
-                          << std::endl;
-                return -1;
-            }
             auto result = copy_server_connections_.emplace(
                 std::piecewise_construct, std::forward_as_tuple(server_url),
                 std::forward_as_tuple(fd));
@@ -66,19 +61,20 @@ int CopyClient::submitTransferToCopyServer(
     // Get local server name from FlexTransferEngine
     const std::string &local_server_name = engine_.getLocalServerName();
 
+    ssize_t nbytes;
+
     // Send segment name length
     uint32_t segment_name_len = local_server_name.size();
-    if (writeFully(fd, &segment_name_len, sizeof(segment_name_len)) !=
-        sizeof(segment_name_len)) {
+    nbytes = writeFully(fd, &segment_name_len, sizeof(segment_name_len));
+    if (nbytes != sizeof(segment_name_len)) {
         throw std::runtime_error(
             "Failed to send segment name length to CopyServer");
     }
 
     // Send segment name
-    if (writeFully(fd, local_server_name.c_str(), segment_name_len) !=
-        segment_name_len) {
+    nbytes = writeFully(fd, local_server_name.c_str(), segment_name_len);
+    if (nbytes != segment_name_len)
         throw std::runtime_error("Failed to send segment name to CopyServer");
-    }
 
     // Send batch info
     struct BatchInfo {
@@ -91,9 +87,9 @@ int CopyClient::submitTransferToCopyServer(
         reinterpret_cast<uint64_t>(&ctrl_block->progress_counter);
     batch_info.num_requests = entries.size();
 
-    if (writeFully(fd, &batch_info, sizeof(batch_info)) != sizeof(batch_info)) {
+    nbytes = writeFully(fd, &batch_info, sizeof(batch_info));
+    if (nbytes != sizeof(batch_info))
         throw std::runtime_error("Failed to send batch info to CopyServer");
-    }
 
     // Send request details (source on remote CopyServer, target on local)
     for (const auto &entry : entries) {
@@ -109,7 +105,8 @@ int CopyClient::submitTransferToCopyServer(
         req_info.target_addr = entry.target_offset;
         req_info.length = entry.length;
 
-        if (writeFully(fd, &req_info, sizeof(req_info)) != sizeof(req_info)) {
+        nbytes = writeFully(fd, &req_info, sizeof(req_info));
+        if (nbytes != sizeof(req_info)) {
             throw std::runtime_error(
                 "Failed to send request info to CopyServer");
         }
@@ -121,8 +118,6 @@ int CopyClient::submitTransferToCopyServer(
 
     std::cerr << "Submitted " << entries.size() << " requests to CopyServer at "
               << server_url << std::endl;
-
-    return 0;
 }
 
 int CopyClient::connectToCopyServer(const std::string &server_url) {
@@ -137,9 +132,8 @@ int CopyClient::connectToCopyServer(const std::string &server_url) {
     if (server_url[0] == '[') {
         size_t bracket_end = server_url.find(']');
         if (bracket_end == std::string::npos) {
-            std::cerr << "Invalid IPv6 format in server_url: " << server_url
-                      << std::endl;
-            return -1;
+            throw std::invalid_argument("Invalid IPv6 format in server_url: " +
+                                        server_url);
         }
         hostname = server_url.substr(1, bracket_end - 1);
 
@@ -148,17 +142,15 @@ int CopyClient::connectToCopyServer(const std::string &server_url) {
             server_url[bracket_end + 1] == ':') {
             port_str = server_url.substr(bracket_end + 2);
         } else {
-            std::cerr << "Missing port in server_url: " << server_url
-                      << std::endl;
-            return -1;
+            throw std::invalid_argument("Missing port in server_url: " +
+                                        server_url);
         }
     } else {
         // IPv4 format or IPv6 without brackets
         size_t last_colon = server_url.rfind(':');
         if (last_colon == std::string::npos) {
-            std::cerr << "Missing port in server_url: " << server_url
-                      << std::endl;
-            return -1;
+            throw std::invalid_argument("Missing port in server_url: " +
+                                        server_url);
         }
         hostname = server_url.substr(0, last_colon);
         port_str = server_url.substr(last_colon + 1);
@@ -172,8 +164,8 @@ int CopyClient::connectToCopyServer(const std::string &server_url) {
 
     int rc = getaddrinfo(hostname.c_str(), port_str.c_str(), &hints, &result);
     if (rc) {
-        std::cerr << "getaddrinfo failed: " << gai_strerror(rc) << std::endl;
-        return -1;
+        throw std::runtime_error("getaddrinfo failed for " + server_url + ": " +
+                                 gai_strerror(rc));
     }
 
     // Try to connect
@@ -188,10 +180,7 @@ int CopyClient::connectToCopyServer(const std::string &server_url) {
 
     freeaddrinfo(result);
 
-    if (fd < 0) {
-        std::cerr << "Failed to connect to " << server_url << std::endl;
-        return -1;
-    }
+    if (fd < 0) throw std::runtime_error("Failed to connect to " + server_url);
 
     // Set socket to non-blocking for progress checking
     int flags = fcntl(fd, F_GETFL, 0);

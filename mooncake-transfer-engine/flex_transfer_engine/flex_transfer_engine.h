@@ -118,8 +118,9 @@ class FlexTransferEngine {
                                    const std::string &server_url,
                                    CopyCtrlBlock *ctrl_block,
                                    ClientConnection **out_conn) {
-        return copy_client_.submitTransferToCopyServer(entries, server_url,
-                                                       ctrl_block, out_conn);
+        copy_client_.submitTransferToCopyServer(entries, server_url, ctrl_block,
+                                                out_conn);
+        return 0;
     }
 
    private:

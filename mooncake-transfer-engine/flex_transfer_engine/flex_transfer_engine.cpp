@@ -409,7 +409,6 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::allocBufferPair(
             throw std::runtime_error(
                 std::string("Failed to allocate GPU memory: ") +
                 cudaGetErrorString(err));
-            return nullptr;
         }
 #else
         throw std::runtime_error(
@@ -470,15 +469,14 @@ int FlexTransferEngine::copyMemory(void *dst, const void *src, size_t size,
                       << std::endl;
             return -1;
         }
-        return 0;
 #else
         throw std::runtime_error(
             "GPU memory copy requested but CUDA support not compiled");
 #endif
     } else {
         memcpy(dst, src, size);
-        return 0;
     }
+    return 0;
 }
 
 /* TCP listener and worker thread functions */

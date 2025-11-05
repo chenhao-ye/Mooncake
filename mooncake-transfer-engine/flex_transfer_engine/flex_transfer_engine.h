@@ -132,13 +132,13 @@ class FlexTransferEngine {
 
         BufferPair(char *buffer_base, size_t size, bool is_cuda)
             : buffers{buffer_base, buffer_base + size},
-              size(0),
+              size(size),
               is_cuda(is_cuda),
               users{-1, -1} {}
 
-        // select the next buffer to use; if any buffer is free (user < 0),
-        // return it; else, return the one with lower-index task (likely to
-        // finish earlier)
+        // select the next buffer to use
+        // return the one with a lower-index task (likely to finish earlier OR
+        // is free for users[i]<0)
         int selectNextBuffer() { return users[0] < users[1] ? 0 : 1; }
     };
 
@@ -183,7 +183,7 @@ class FlexTransferEngine {
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
     // TCP listener and worker thread functions
-    int startListener();
+    void startListener();
 
     void stopListener();
 

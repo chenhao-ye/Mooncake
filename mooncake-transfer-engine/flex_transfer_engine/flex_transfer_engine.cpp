@@ -15,12 +15,11 @@
 #include <unordered_set>
 
 #include "transfer_engine_c.h"
+#include "util.h"
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
-
-#include "util.h"
 
 FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
                                        const std::string &local_server_name,
@@ -31,6 +30,11 @@ FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
       ctrl_block_location_(ctrl_block_location),
       worker_running_(false),
       listener_fd_(-1) {
+    if (ctrl_block_location.find("cuda:") == 0) {
+        throw std::invalid_argument(
+            "ctrl_block_location must not be on CUDA: " + ctrl_block_location);
+    }
+
     // Create the underlying TransferEngine
     engine_ = ::createTransferEngine(metadata_conn_string.c_str(),
                                      local_server_name.c_str(),
@@ -39,10 +43,7 @@ FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
     if (!engine_) throw std::runtime_error("Failed to create TransferEngine");
 
     // Start TCP listener only if enable_copy_ is true
-    if (enable_copy_) {
-        int rc = startListener();
-        if (rc < 0) throw std::runtime_error("Failed to start TCP listener");
-    }
+    if (enable_copy_) startListener();
 }
 
 FlexTransferEngine::~FlexTransferEngine() {
@@ -66,13 +67,13 @@ FlexTransferEngine::~FlexTransferEngine() {
     {
         std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
         for (CopyCtrlBlock *ctrl_block : copy_ctrl_block_cache_) {
-            if (engine_) ::unregisterLocalMemory(engine_, ctrl_block);
+            ::unregisterLocalMemory(engine_, ctrl_block);
             delete ctrl_block;
         }
         // copy_ctrl_block_cache_.clear();
     }
 
-    if (engine_) ::destroyTransferEngine(engine_);
+    ::destroyTransferEngine(engine_);
 }
 
 int FlexTransferEngine::registerLocalMemory(void *addr, size_t length,
@@ -373,6 +374,8 @@ FlexTransferEngine::MemoryRegion *FlexTransferEngine::getRegion(void *addr,
     return nullptr;
 }
 
+// Weakly wait for a task to complete
+// Returns 0 on success, -1 on failure
 int FlexTransferEngine::waitTask(Task &task) {
     if (task.batch_id == INVALID_BATCH) return 0;
 
@@ -383,9 +386,9 @@ int FlexTransferEngine::waitTask(Task &task) {
         rc = ::getTransferStatus(engine_, task.batch_id, 0, &status);
         assert(rc == 0);
         if (status.status != STATUS_WAITING) {  // completed or error
+            task.buffer_pair->users[task.buffer_idx] = -1;  // mark buffer free
             ::freeBatchID(engine_, task.batch_id);
             task.batch_id = INVALID_BATCH;
-            task.buffer_pair->users[task.buffer_idx] = -1;  // mark as free
             task.buffer_pair = nullptr;
             task.buffer_idx = -1;
             return status.status == STATUS_COMPLETED ? 0 : -1;
@@ -469,9 +472,8 @@ int FlexTransferEngine::copyMemory(void *dst, const void *src, size_t size,
         }
         return 0;
 #else
-        std::cerr << "GPU memory copy requested but CUDA support not compiled"
-                  << std::endl;
-        return -1;
+        throw std::runtime_error(
+            "GPU memory copy requested but CUDA support not compiled");
 #endif
     } else {
         memcpy(dst, src, size);
@@ -481,29 +483,25 @@ int FlexTransferEngine::copyMemory(void *dst, const void *src, size_t size,
 
 /* TCP listener and worker thread functions */
 
-int FlexTransferEngine::startListener() {
+void FlexTransferEngine::startListener() {
     // Use findAvailableTcpPort to find an available port
     uint16_t tcp_port = findAvailableTcpPort(listener_fd_);
-    if (tcp_port == 0) {
-        std::cerr << "Failed to find available TCP port" << std::endl;
-        return -1;
-    }
+    if (tcp_port == 0)
+        throw std::runtime_error("Failed to find available TCP port");
 
     // The socket is already bound by findAvailableTcpPort, just listen
     if (listen(listener_fd_, 128) < 0) {
-        std::cerr << "Failed to listen on port " << tcp_port << ": "
-                  << strerror(errno) << std::endl;
         close(listener_fd_);
         listener_fd_ = -1;
-        return -1;
+        throw std::runtime_error("Failed to listen on port " +
+                                 std::to_string(tcp_port) + ": " +
+                                 strerror(errno));
     }
 
     // Determine the IP address to use for the server URL
     auto ip_list = findLocalIpAddresses();
-    if (ip_list.empty() || ip_list[0].empty()) {
-        std::cerr << "Failed to find local IP addresses" << std::endl;
-        return -1;
-    }
+    if (ip_list.empty() || ip_list[0].empty())
+        throw std::runtime_error("Failed to find local IP addresses");
     const std::string &server_ip = ip_list[0];
 
     // Set local_copy_server_url_
@@ -523,7 +521,6 @@ int FlexTransferEngine::startListener() {
     // finally, start worker thread
     worker_running_ = true;
     worker_thread_ = std::thread(&FlexTransferEngine::workerThread, this);
-    return 0;
 }
 
 void FlexTransferEngine::stopListener() {

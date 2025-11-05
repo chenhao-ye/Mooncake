@@ -7,6 +7,7 @@
 #include "transfer_engine_c.h"
 
 struct CopyCtrlBlock;
+struct ClientConnection;
 class FlexTransferEngine;
 
 /**
@@ -23,7 +24,8 @@ class FlexBatch {
     explicit FlexBatch(std::shared_ptr<FlexTransferEngine> engine)
         : engine_(std::move(engine)),
           batch_id_(INVALID_BATCH),
-          copy_ctrl_block_(nullptr) {}
+          copy_ctrl_block_(nullptr),
+          client_conn_(nullptr) {}
 
     ~FlexBatch();
 
@@ -44,6 +46,8 @@ class FlexBatch {
 
     /**
      * Get the status of a transfer task.
+     * For copy-based transfers, this automatically checks the socket for
+     * finalized progress if the progress counter hasn't changed.
      * @param task_id The task ID within this batch
      * @param status Output parameter for transfer status
      */
@@ -53,5 +57,6 @@ class FlexBatch {
     std::shared_ptr<FlexTransferEngine> engine_;
     batch_id_t batch_id_;
     CopyCtrlBlock *copy_ctrl_block_;
+    ClientConnection *client_conn_;  // For copy-based transfers
     std::vector<transfer_request_t> entries_;
 };

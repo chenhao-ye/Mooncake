@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -17,6 +18,20 @@ class FlexTransferEngine;
 
 struct CopyCtrlBlock {
     volatile std::atomic_int64_t progress_counter = 0;
+};
+
+// Client-side connection state (combines fd + progress tracking)
+struct ClientConnection {
+    int fd;
+    int64_t last_progress;
+    bool finalized_received;
+    int32_t finalized_value;
+
+    ClientConnection(int fd)
+        : fd(fd),
+          last_progress(0),
+          finalized_received(false),
+          finalized_value(0) {}
 };
 
 /**
@@ -109,7 +124,8 @@ class FlexTransferEngine {
 
     int submitTransferToCopyEngine(std::vector<transfer_request_t> &entries,
                                    const std::string &server_url,
-                                   CopyCtrlBlock *ctrl_block);
+                                   CopyCtrlBlock *ctrl_block,
+                                   ClientConnection **out_conn);
 
    private:
     using LocIdx = int32_t;  // <0 for invalid location
@@ -229,11 +245,15 @@ class FlexTransferEngine {
     int listener_fd_;
     std::string local_copy_server_url_;  // Copy server URL for this instance
 
-    // TCP connections to remote FlexTransferEngine (server_url -> fd)
-    std::unordered_map<std::string, int> copy_engine_connections_;
+    // Client-side: TCP connections to remote FlexTransferEngine (server_url -> connection)
+    std::unordered_map<std::string, ClientConnection> copy_engine_connections_;
     std::mutex connections_mutex_;
 
     // Cache of CopyCtrlBlock objects for copy-based transfers
     std::vector<CopyCtrlBlock *> copy_ctrl_block_cache_;
     std::mutex ctrl_block_mutex_;
+
+    // Server-side: Active client connections (only used when enable_copy is true)
+    // Server is single-threaded, no mutex needed
+    std::deque<int> active_client_fds_;
 };

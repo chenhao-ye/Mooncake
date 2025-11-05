@@ -1,8 +1,10 @@
 #include "flex_transfer_engine.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -55,7 +57,7 @@ FlexTransferEngine::~FlexTransferEngine() {
         // buffer_pool_.clear();
     }
 
-    for (const auto &[_, fd] : copy_engine_connections_) close(fd);
+    for (const auto &[_, conn] : copy_engine_connections_) close(conn.fd);
 
     {
         std::lock_guard<std::mutex> segment_lock(segment_cache_mutex_);
@@ -245,17 +247,23 @@ void FlexTransferEngine::releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block) {
 
 int FlexTransferEngine::submitTransferToCopyEngine(
     std::vector<transfer_request_t> &entries, const std::string &server_url,
-    CopyCtrlBlock *ctrl_block) {
+    CopyCtrlBlock *ctrl_block, ClientConnection **out_conn) {
     if (entries.empty()) return 0;
     assert(ctrl_block);
 
     // Connect to the remote FlexTransferEngine (or reuse existing connection)
+    ClientConnection *conn = nullptr;
     int fd = -1;
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
         auto it = copy_engine_connections_.find(server_url);
         if (it != copy_engine_connections_.end()) {
-            fd = it->second;
+            conn = &it->second;
+            fd = conn->fd;
+            // Reset progress tracking for new batch
+            conn->last_progress = 0;
+            conn->finalized_received = false;
+            conn->finalized_value = 0;
         } else {
             fd = connectToCopyEngine(server_url);
             if (fd < 0) {
@@ -263,9 +271,15 @@ int FlexTransferEngine::submitTransferToCopyEngine(
                           << server_url << std::endl;
                 return -1;
             }
-            copy_engine_connections_[server_url] = fd;
+            auto result = copy_engine_connections_.emplace(
+                std::piecewise_construct, std::forward_as_tuple(server_url),
+                std::forward_as_tuple(fd));
+            conn = &result.first->second;
         }
     }
+
+    // Return connection pointer if requested
+    if (out_conn) *out_conn = conn;
 
     // Send protocol to remote FlexTransferEngine:
     // 1. Segment name length (4 bytes)
@@ -540,209 +554,277 @@ void FlexTransferEngine::stopListener() {
 void FlexTransferEngine::workerThread() {
     std::cerr << "Worker thread started" << std::endl;
 
-    while (worker_running_.load(std::memory_order_acquire)) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
+    // Set listener to non-blocking
+    int flags = fcntl(listener_fd_, F_GETFL, 0);
+    fcntl(listener_fd_, F_SETFL, flags | O_NONBLOCK);
 
-        int client_fd =
-            accept(listener_fd_, (struct sockaddr *)&client_addr, &client_len);
-        if (client_fd < 0) {
-            std::cerr << "Failed to accept connection: " << strerror(errno)
-                      << std::endl;
+    while (worker_running_.load(std::memory_order_acquire)) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(listener_fd_, &read_fds);
+
+        int max_fd = listener_fd_;
+
+        // Add all active client connections to the set
+        for (int client_fd : active_client_fds_) {
+            FD_SET(client_fd, &read_fds);
+            if (client_fd > max_fd) max_fd = client_fd;
+        }
+
+        // Use select with timeout to allow checking worker_running_
+        struct timeval timeout;
+        timeout.tv_sec = 1;  // 1s
+        timeout.tv_usec = 0;
+
+        int activity =
+            select(max_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+        if (activity < 0 && errno != EINTR) {
+            std::cerr << "select error: " << strerror(errno) << std::endl;
             continue;
         }
 
-        char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-        std::cerr << "Accepted connection from " << client_ip << ":"
-                  << ntohs(client_addr.sin_port) << std::endl;
+        if (activity == 0) continue;  // timeout
 
-        // Handle and process the request directly
-        handleAndProcessRequest(client_fd);
+        // Check for new connections on listener
+        if (FD_ISSET(listener_fd_, &read_fds)) {
+            struct sockaddr_in client_addr;
+            socklen_t client_len = sizeof(client_addr);
+
+            int client_fd = accept(
+                listener_fd_, (struct sockaddr *)&client_addr, &client_len);
+            if (client_fd >= 0) {
+                char client_ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &client_addr.sin_addr, client_ip,
+                          sizeof(client_ip));
+                std::cerr << "Accepted connection from " << client_ip << ":"
+                          << ntohs(client_addr.sin_port) << std::endl;
+
+                active_client_fds_.push_back(client_fd);
+            }
+        }
+
+        // Check for data on existing connections (process one at a time)
+        for (int client_fd : active_client_fds_) {
+            if (FD_ISSET(client_fd, &read_fds)) {
+                handleAndProcessRequest(client_fd);
+                break;  // Process only one request per iteration
+            }
+        }
+    }
+
+    // Clean up all active connections
+    for (int client_fd : active_client_fds_) {
         close(client_fd);
     }
+    active_client_fds_.clear();
 
     std::cerr << "Worker thread stopped" << std::endl;
 }
 
 void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
+    int32_t num_completed = 0;
+
     // Read segment name length
     uint32_t segment_name_len;
     if (readFully(client_fd, &segment_name_len, sizeof(segment_name_len)) !=
         sizeof(segment_name_len)) {
         std::cerr << "Failed to read segment name length" << std::endl;
-        return;
+        goto cleanup;
     }
 
     const static size_t kMaxLength = 1ull << 20;
     if (segment_name_len == 0 || segment_name_len > kMaxLength) {
         std::cerr << "Invalid segment name length: " << segment_name_len
                   << std::endl;
-        return;
+        goto cleanup;
     }
 
     // Read segment name
-    std::string segment_name(segment_name_len + 1, '\0');
-    if (readFully(client_fd, segment_name.data(), segment_name_len) !=
-        segment_name_len) {
-        std::cerr << "Failed to read segment name" << std::endl;
-        return;
-    }
+    {
+        std::string segment_name(segment_name_len + 1, '\0');
+        if (readFully(client_fd, segment_name.data(), segment_name_len) !=
+            segment_name_len) {
+            std::cerr << "Failed to read segment name" << std::endl;
+            goto cleanup;
+        }
 
-    std::cerr << "Received request for segment: " << segment_name << std::endl;
+        std::cerr << "Received request for segment: " << segment_name
+                  << std::endl;
 
-    // Get or open segment
-    segment_id_t target_segment_id = getSegmentId(segment_name);
-    if (target_segment_id < 0) {
-        std::cerr << "Failed to open segment: " << segment_name << std::endl;
-        return;
-    }
+        // Get or open segment
+        segment_id_t target_segment_id = getSegmentId(segment_name);
+        if (target_segment_id < 0) {
+            std::cerr << "Failed to open segment: " << segment_name
+                      << std::endl;
+            goto cleanup;
+        }
 
-    // Read batch info
-    struct BatchInfo {
-        uint64_t progress_addr;
-        uint64_t num_requests;
-    };
-
-    BatchInfo batch_info;
-    if (readFully(client_fd, &batch_info, sizeof(batch_info)) !=
-        sizeof(batch_info)) {
-        std::cerr << "Failed to read batch info" << std::endl;
-        return;
-    }
-
-    std::cerr << "Received transfer request: progress_addr=0x" << std::hex
-              << batch_info.progress_addr << std::dec
-              << ", num_requests=" << batch_info.num_requests << std::endl;
-
-    // Read request details and convert them into tasks
-    std::vector<Task> tasks;
-
-    for (uint64_t i = 0; i < batch_info.num_requests; ++i) {
-        struct RequestInfo {
-            uint64_t source_addr;
-            uint64_t target_addr;
-            uint64_t length;
+        // Read batch info
+        struct BatchInfo {
+            uint64_t progress_addr;
+            uint64_t num_requests;
         };
 
-        RequestInfo req_info;
-        if (readFully(client_fd, &req_info, sizeof(req_info)) !=
-            sizeof(req_info)) {
-            std::cerr << "Failed to read request info" << std::endl;
-            return;
-        }
-        tasks.emplace_back(reinterpret_cast<void *>(req_info.source_addr),
-                           req_info.target_addr, req_info.length);
-    }
-
-    CopyCtrlBlock *copy_ctrl_block = acquireCopyCtrlBlock();
-    if (!copy_ctrl_block) {
-        std::cerr << "Failed to acquire CopyCtrlBlock" << std::endl;
-        return;
-    }
-
-    int num_tasks_done = 0;
-    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
-
-    for (size_t i = 0; i < tasks.size(); ++i) {
-        Task &task = tasks[i];
-
-        // delayed source address validation:
-        // if source_addr is invalid, will be detected here
-        MemoryRegion *region = getRegion(task.source_addr, task.length);
-        if (!region) {
-            std::cerr << "Source address " << task.source_addr
-                      << " not in registered copiable regions" << std::endl;
-            goto err;
+        BatchInfo batch_info;
+        if (readFully(client_fd, &batch_info, sizeof(batch_info)) !=
+            sizeof(batch_info)) {
+            std::cerr << "Failed to read batch info" << std::endl;
+            goto cleanup;
         }
 
-        // Get a buffer pair for this location
-        BufferPair &buffer_pair = getBufferPair(region->loc_idx);
-        assert(buffer_pair.size >= task.length);
+        std::cerr << "Received transfer request: progress_addr=0x" << std::hex
+                  << batch_info.progress_addr << std::dec
+                  << ", num_requests=" << batch_info.num_requests << std::endl;
 
-        int buffer_idx = buffer_pair.selectNextBuffer();
-        int buffer_used_by_task_idx = buffer_pair.users[buffer_idx];
-        if (buffer_used_by_task_idx >= 0) {
-            int rc = waitTask(tasks[buffer_used_by_task_idx]);
-            if (rc) {
-                std::cerr << "Failed to wait for previous task on buffer "
-                          << buffer_idx << std::endl;
-                goto err;
+        // Read request details and convert them into tasks
+        std::vector<Task> tasks;
+
+        for (uint64_t i = 0; i < batch_info.num_requests; ++i) {
+            struct RequestInfo {
+                uint64_t source_addr;
+                uint64_t target_addr;
+                uint64_t length;
+            };
+
+            RequestInfo req_info;
+            if (readFully(client_fd, &req_info, sizeof(req_info)) !=
+                sizeof(req_info)) {
+                std::cerr << "Failed to read request info" << std::endl;
+                goto cleanup;
+            }
+            tasks.emplace_back(reinterpret_cast<void *>(req_info.source_addr),
+                               req_info.target_addr, req_info.length);
+        }
+
+        CopyCtrlBlock *copy_ctrl_block = acquireCopyCtrlBlock();
+        if (!copy_ctrl_block) {
+            std::cerr << "Failed to acquire CopyCtrlBlock" << std::endl;
+            goto cleanup;
+        }
+
+        {
+            std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+
+            for (size_t i = 0; i < tasks.size(); ++i) {
+                Task &task = tasks[i];
+
+                // delayed source address validation:
+                // if source_addr is invalid, will be detected here
+                MemoryRegion *region = getRegion(task.source_addr, task.length);
+                if (!region) {
+                    std::cerr << "Source address " << task.source_addr
+                              << " not in registered copiable regions"
+                              << std::endl;
+                    goto err;
+                }
+
+                // Get a buffer pair for this location
+                BufferPair &buffer_pair = getBufferPair(region->loc_idx);
+                assert(buffer_pair.size >= task.length);
+
+                int buffer_idx = buffer_pair.selectNextBuffer();
+                int buffer_used_by_task_idx = buffer_pair.users[buffer_idx];
+                if (buffer_used_by_task_idx >= 0) {
+                    int rc = waitTask(tasks[buffer_used_by_task_idx]);
+                    if (rc) {
+                        std::cerr
+                            << "Failed to wait for previous task on buffer "
+                            << buffer_idx << std::endl;
+                        goto err;
+                    }
+                }
+
+                void *buffer = buffer_pair.buffers[buffer_idx];
+
+                // Copy data from source to buffer
+                int rc = copyMemory(buffer, task.source_addr, task.length,
+                                    buffer_pair.is_cuda);
+                if (rc) {
+                    std::cerr << "Failed to copy memory from "
+                              << task.source_addr << " to buffer " << buffer
+                              << std::endl;
+                    goto err;
+                }
+
+                // Submit RDMA write from buffer to remote target
+                batch_id_t batch_id = ::allocateBatchID(engine_, 1);
+                transfer_request_t write_req = {
+                    .opcode = OPCODE_WRITE,
+                    .source = buffer,
+                    .target_id = target_segment_id,
+                    .target_offset = task.target_addr,
+                    .length = task.length,
+                };
+
+                int submit_rc =
+                    ::submitTransfer(engine_, batch_id, &write_req, 1);
+                if (submit_rc < 0) {
+                    std::cerr << "Failed to submit RDMA write" << std::endl;
+                    ::freeBatchID(engine_, batch_id);
+                    goto err;
+                }
+
+                task.batch_id = batch_id;
+                task.buffer_pair = &buffer_pair;
+                task.buffer_idx = buffer_idx;
+            }
+
+            for (auto &task : tasks) {
+                int rc = waitTask(task);
+                if (rc) {
+                    std::cerr << "Failed to wait for task completion"
+                              << std::endl;
+                    goto err;
+                }
+                num_completed++;
+            }
+
+            // Update progress to indicate completion via RDMA
+            {
+                copy_ctrl_block->progress_counter.store(
+                    num_completed, std::memory_order_release);
+                batch_id_t batch_id = ::allocateBatchID(engine_, 1);
+                transfer_request_t progress_req = {
+                    .opcode = OPCODE_WRITE,
+                    .source = (void *)&(copy_ctrl_block->progress_counter),
+                    .target_id = target_segment_id,
+                    .target_offset =
+                        reinterpret_cast<uint64_t>(batch_info.progress_addr),
+                    .length = sizeof(int64_t),
+                };
+                ::submitTransfer(engine_, batch_id, &progress_req, 1);
+
+                // Wait for completion
+                transfer_status_t status;
+                while (::getTransferStatus(engine_, batch_id, 0, &status) ==
+                           0 &&
+                       status.status != STATUS_COMPLETED) {
+                    usleep(1);
+                }
+                ::freeBatchID(engine_, batch_id);
+
+                std::cerr << "Completed transfer request: " << num_completed
+                          << " tasks" << std::endl;
+            }
+
+        err:
+            // Clean up any pending tasks
+            for (auto &task : tasks) {
+                int rc = waitTask(task);
+                if (rc)
+                    std::cerr << "Failed to wait for task completion"
+                              << std::endl;
             }
         }
 
-        void *buffer = buffer_pair.buffers[buffer_idx];
-
-        // Copy data from source to buffer
-        int rc = copyMemory(buffer, task.source_addr, task.length,
-                            buffer_pair.is_cuda);
-        if (rc) {
-            std::cerr << "Failed to copy memory from " << task.source_addr
-                      << " to buffer " << buffer << std::endl;
-            goto err;
-        }
-
-        // Submit RDMA write from buffer to remote target
-        batch_id_t batch_id = ::allocateBatchID(engine_, 1);
-        transfer_request_t write_req = {
-            .opcode = OPCODE_WRITE,
-            .source = buffer,
-            .target_id = target_segment_id,
-            .target_offset = task.target_addr,
-            .length = task.length,
-        };
-
-        int submit_rc = ::submitTransfer(engine_, batch_id, &write_req, 1);
-        if (submit_rc < 0) {
-            std::cerr << "Failed to submit RDMA write" << std::endl;
-            ::freeBatchID(engine_, batch_id);
-            goto err;
-        }
-
-        task.batch_id = batch_id;
-        task.buffer_pair = &buffer_pair;
-        task.buffer_idx = buffer_idx;
+        releaseCopyCtrlBlock(copy_ctrl_block);
     }
 
-    for (auto &task : tasks) {
-        int rc = waitTask(task);
-        if (rc) {
-            std::cerr << "Failed to wait for task completion" << std::endl;
-            goto err;
-        }
-    }
-
-    // Update progress to indicate completion
-    {
-        copy_ctrl_block->progress_counter.store(tasks.size(),
-                                                std::memory_order_release);
-        batch_id_t batch_id = ::allocateBatchID(engine_, 1);
-        transfer_request_t progress_req = {
-            .opcode = OPCODE_WRITE,
-            .source = (void *)&(copy_ctrl_block->progress_counter),
-            .target_id = target_segment_id,
-            .target_offset =
-                reinterpret_cast<uint64_t>(batch_info.progress_addr),
-            .length = sizeof(int64_t),
-        };
-        ::submitTransfer(engine_, batch_id, &progress_req, 1);
-
-        // Wait for completion
-        transfer_status_t status;
-        while (::getTransferStatus(engine_, batch_id, 0, &status) == 0 &&
-               status.status != STATUS_COMPLETED) {
-            usleep(1);
-        }
-        ::freeBatchID(engine_, batch_id);
-
-        std::cerr << "Completed transfer request" << std::endl;
-    }
-
-err:
-
-    for (auto &task : tasks) {
-        int rc = waitTask(task);
-        if (rc) std::cerr << "Failed to wait for task completion" << std::endl;
+cleanup:
+    // Send completion count via socket (0 or negative on error)
+    if (writeFully(client_fd, &num_completed, sizeof(num_completed)) !=
+        sizeof(num_completed)) {
+        std::cerr << "Failed to send completion count" << std::endl;
     }
 }
 
@@ -750,11 +832,6 @@ int FlexTransferEngine::connectToCopyEngine(const std::string &server_url) {
     // Parse server_url in format "ip_addr:port"
     // For IPv6: "[ipv6_addr]:port" or "ipv6_addr:port"
     // For IPv4: "ipv4_addr:port"
-
-    if (server_url.empty()) {
-        std::cerr << "Empty server_url provided" << std::endl;
-        return -1;
-    }
 
     std::string hostname;
     std::string port_str;
@@ -818,6 +895,10 @@ int FlexTransferEngine::connectToCopyEngine(const std::string &server_url) {
         std::cerr << "Failed to connect to " << server_url << std::endl;
         return -1;
     }
+
+    // Set socket to non-blocking for progress checking
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
     std::cerr << "Connected to FlexTransferEngine at " << server_url
               << std::endl;

@@ -185,7 +185,7 @@ int FlexTransferEngine::unregisterLocalMemoryBatch(
      * other memory regions are unaffected (will continue the unregisteration),
      * and only return -1 to indicate that at least one region failed.
      */
-    int ret = 0;
+    int rc = 0;
 
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
     for (void *addr : addr_list) {
@@ -193,11 +193,11 @@ int FlexTransferEngine::unregisterLocalMemoryBatch(
         if (it != copiable_regions_.end()) {
             copiable_regions_.erase(it);
         } else {
-            ret = -1;  // Not found, but will continue
+            rc = -1;  // Not found, but will continue
         }
     }
 
-    return ret;
+    return rc;
 }
 
 segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {
@@ -221,54 +221,35 @@ CopyCtrlBlock *FlexTransferEngine::acquireCopyCtrlBlock() {
     if (!copy_ctrl_block_cache_.empty()) {
         CopyCtrlBlock *ctrl_block = copy_ctrl_block_cache_.back();
         copy_ctrl_block_cache_.pop_back();
-        ctrl_block->progress_counter = 0;
+        ctrl_block->progress_counter.store(0, std::memory_order_release);
         return ctrl_block;
     }
 
     // Cache is empty, allocate a new one
     CopyCtrlBlock *ctrl_block = new CopyCtrlBlock();
-    ctrl_block->progress_counter = 0;
 
     // Register it with RDMA using the specified location
-    int ret = ::registerLocalMemory(engine_, ctrl_block, sizeof(CopyCtrlBlock),
-                                    ctrl_block_location_.c_str(), 1);
-    if (ret < 0) {
-        std::cerr << "Failed to register CopyCtrlBlock with RDMA" << std::endl;
+    int rc = ::registerLocalMemory(engine_, ctrl_block, sizeof(CopyCtrlBlock),
+                                   ctrl_block_location_.c_str(),
+                                   /*remote_accessible*/ true);
+    if (rc) {
         delete ctrl_block;
         return nullptr;
     }
-
-    std::cerr << "Allocated and registered new CopyCtrlBlock at " << ctrl_block
-              << std::endl;
     return ctrl_block;
 }
 
 void FlexTransferEngine::releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block) {
     if (!ctrl_block) return;
     std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
-    copy_ctrl_block_cache_.push_back(ctrl_block);
+    copy_ctrl_block_cache_.emplace_back(ctrl_block);
 }
 
 int FlexTransferEngine::submitTransferToCopyEngine(
     std::vector<transfer_request_t> &entries, const std::string &server_url,
     CopyCtrlBlock *ctrl_block) {
-    // Verify all entries are read requests
-    for (const auto &entry : entries) {
-        if (entry.opcode != OPCODE_READ) {
-            std::cerr << "Only read requests are supported when target is "
-                         "FlexTransferEngine with copy mode"
-                      << std::endl;
-            return -1;
-        }
-    }
-
     if (entries.empty()) return 0;
-
-    if (!ctrl_block) {
-        std::cerr << "Error: ctrl_block is nullptr for copy-based transfer"
-                  << std::endl;
-        return -1;
-    }
+    assert(ctrl_block);
 
     // Connect to the remote FlexTransferEngine (or reuse existing connection)
     int fd = -1;
@@ -300,17 +281,15 @@ int FlexTransferEngine::submitTransferToCopyEngine(
     uint32_t segment_name_len = local_server_name_.size();
     if (writeFully(fd, &segment_name_len, sizeof(segment_name_len)) !=
         sizeof(segment_name_len)) {
-        std::cerr << "Failed to send segment name length to FlexTransferEngine"
-                  << std::endl;
-        return -1;
+        throw std::runtime_error(
+            "Failed to send segment name length to FlexTransferEngine");
     }
 
     // Send segment name
     if (writeFully(fd, local_server_name_.c_str(), segment_name_len) !=
         segment_name_len) {
-        std::cerr << "Failed to send segment name to FlexTransferEngine"
-                  << std::endl;
-        return -1;
+        throw std::runtime_error(
+            "Failed to send segment name to FlexTransferEngine");
     }
 
     // Send batch info
@@ -325,14 +304,14 @@ int FlexTransferEngine::submitTransferToCopyEngine(
     batch_info.num_requests = entries.size();
 
     if (writeFully(fd, &batch_info, sizeof(batch_info)) != sizeof(batch_info)) {
-        std::cerr << "Failed to send batch info to FlexTransferEngine"
-                  << std::endl;
-        return -1;
+        throw std::runtime_error(
+            "Failed to send batch info to FlexTransferEngine");
     }
 
     // Send request details (source on remote FlexTransferEngine, target on
     // local FlexTransferEngine)
     for (const auto &entry : entries) {
+        assert(entry.opcode == OPCODE_READ);
         struct RequestInfo {
             uint64_t source_addr;
             uint64_t target_addr;
@@ -345,16 +324,14 @@ int FlexTransferEngine::submitTransferToCopyEngine(
         req_info.length = entry.length;
 
         if (writeFully(fd, &req_info, sizeof(req_info)) != sizeof(req_info)) {
-            std::cerr << "Failed to send request info to FlexTransferEngine"
-                      << std::endl;
-            return -1;
+            throw std::runtime_error(
+                "Failed to send request info to FlexTransferEngine");
         }
     }
 
     // The remote FlexTransferEngine will now process the requests
     // asynchronously and update the progress counter via RDMA writes. The
-    // caller should poll the progress or use getTransferStatus to check
-    // completion.
+    // caller should poll the progress to check completion.
 
     std::cerr << "Submitted " << entries.size()
               << " requests to FlexTransferEngine at " << server_url
@@ -490,9 +467,10 @@ FlexTransferEngine::BufferPair *FlexTransferEngine::allocBufferPair(
     }
 
     // Register the entire contiguous buffer with RDMA
-    int ret = ::registerLocalMemory(engine_, pair->buffers[0], total_size,
-                                    location.c_str(), 1);
-    if (ret < 0) {
+    int rc =
+        ::registerLocalMemory(engine_, pair->buffers[0], total_size,
+                              location.c_str(), /*remote_accessible*/ true);
+    if (rc) {
         std::cerr << "Failed to register buffer with RDMA" << std::endl;
         if (pair->is_cuda) {
 #ifdef USE_CUDA
@@ -748,8 +726,8 @@ void FlexTransferEngine::handleAndProcessRequest(int client_fd) {
         void *buffer = buffer_pair->buffers[buffer_idx];
 
         // Copy data from source to buffer
-        int ret = copyMemory(buffer, source_addr, length, buffer_pair->is_cuda);
-        if (ret < 0) {
+        int rc = copyMemory(buffer, source_addr, length, buffer_pair->is_cuda);
+        if (rc) {
             std::cerr << "Failed to copy memory from " << source_addr
                       << " to buffer " << buffer << std::endl;
             return;
@@ -854,9 +832,9 @@ int FlexTransferEngine::connectToCopyEngine(const std::string &server_url) {
     hints.ai_family = AF_UNSPEC;  // Support both IPv4 and IPv6
     hints.ai_socktype = SOCK_STREAM;
 
-    int ret = getaddrinfo(hostname.c_str(), port_str.c_str(), &hints, &result);
-    if (ret != 0) {
-        std::cerr << "getaddrinfo failed: " << gai_strerror(ret) << std::endl;
+    int rc = getaddrinfo(hostname.c_str(), port_str.c_str(), &hints, &result);
+    if (rc) {
+        std::cerr << "getaddrinfo failed: " << gai_strerror(rc) << std::endl;
         return -1;
     }
 

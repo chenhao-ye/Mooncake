@@ -16,7 +16,7 @@
 class FlexTransferEngine;
 
 struct CopyCtrlBlock {
-    volatile int64_t progress_counter;
+    volatile std::atomic_int64_t progress_counter = 0;
 };
 
 /**
@@ -121,11 +121,11 @@ class FlexTransferEngine {
     };
 
     struct BufferPair {
-        void
-            *buffers[2];  // buffers[0] is first half, buffers[1] is second half
-                          // buffers[0] is also the base address of allocation
-        size_t size;      // Size of each half
-        bool is_cuda;     // true if CUDA memory, false if CPU memory
+        // buffers[0] is first half, buffers[1] is second half
+        // buffers[0] is also the base address of allocation
+        void *buffers[2];
+        size_t size;   // Size of each half
+        bool is_cuda;  // true if CUDA memory, false if CPU memory
         // if buffers_user[i] != INVALID_BATCH, it means that buffer is
         // currently used by that batch. Each batch should be size=1.
         batch_id_t buffers_user[2];

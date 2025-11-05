@@ -64,7 +64,7 @@ int FlexBatch::getTransferStatus(size_t task_id, transfer_status_t &status) {
         status.status = STATUS_COMPLETED;
         status.transferred_bytes = entries_[task_id].length;
     } else {  // still in progress or waiting
-        status.status = STATUS_PENDING;
+        status.status = STATUS_WAITING;
         status.transferred_bytes = 0;
     }
     return 0;

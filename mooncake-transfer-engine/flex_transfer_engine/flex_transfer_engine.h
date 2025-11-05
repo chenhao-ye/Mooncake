@@ -123,22 +123,54 @@ class FlexTransferEngine {
     struct BufferPair {
         // buffers[0] is first half, buffers[1] is second half
         // buffers[0] is also the base address of allocation
-        void *buffers[2];
+        char *buffers[2];
         size_t size;   // Size of each half
         bool is_cuda;  // true if CUDA memory, false if CPU memory
-        // if buffers_user[i] != INVALID_BATCH, it means that buffer is
-        // currently used by that batch. Each batch should be size=1.
-        batch_id_t buffers_user[2];
+
+        // Used by tasks with given index (-1 for unused)
+        int users[2] = {-1, -1};
+
+        BufferPair(char *buffer_base, size_t size, bool is_cuda)
+            : buffers{buffer_base, buffer_base + size},
+              size(0),
+              is_cuda(is_cuda),
+              users{-1, -1} {}
+
+        // select the next buffer to use; if any buffer is free (user < 0),
+        // return it; else, return the one with lower-index task (likely to
+        // finish earlier)
+        int selectNextBuffer() { return users[0] < users[1] ? 0 : 1; }
     };
 
-    // Require regions_mutex_ to be held before calling
-    MemoryRegion *getRegion(void *addr, size_t length);
+    struct Task {
+        // request info
+        void *source_addr;
+        uint64_t target_addr;
+        size_t length;
+        // execution info
+        batch_id_t batch_id = INVALID_BATCH;
+        struct BufferPair *buffer_pair = nullptr;
+        int buffer_idx = -1;
+
+        Task(void *source_addr, uint64_t target_addr, size_t length)
+            : source_addr(source_addr),
+              target_addr(target_addr),
+              length(length),
+              batch_id(INVALID_BATCH),
+              buffer_pair(nullptr),
+              buffer_idx(-1) {}
+    };
 
     // Require regions_mutex_ to be held before calling
     LocIdx getLocIdx(const std::string &location);
 
     // Require regions_mutex_ to be held before calling
-    BufferPair *getBufferPair(LocIdx loc_idx, size_t size);
+    MemoryRegion *getRegion(void *addr, size_t length);
+
+    // Require regions_mutex_ to be held before calling
+    // When this function is called, there MUST be a buffer pair ready with the
+    // proper length (which should have been set up upon registration)
+    BufferPair &getBufferPair(LocIdx loc_idx) { return *buffer_pool_[loc_idx]; }
 
     // Require regions_mutex_ to be held before calling
     BufferPair *allocBufferPair(LocIdx loc_idx, const std::string &location,
@@ -146,9 +178,7 @@ class FlexTransferEngine {
     // Require regions_mutex_ to be held before calling
     void freeBufferPair(BufferPair *pair);
 
-    int waitOneBufferAvailable(BufferPair *pair);
-
-    int waitAllBuffersAvailable(BufferPair *pair);
+    int waitTask(Task &task);
 
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
@@ -199,7 +229,7 @@ class FlexTransferEngine {
     int listener_fd_;
     std::string local_copy_server_url_;  // Copy server URL for this instance
 
-    // TCP connections to remote FlexTransferEngine instances (server_url -> fd)
+    // TCP connections to remote FlexTransferEngine (server_url -> fd)
     std::unordered_map<std::string, int> copy_engine_connections_;
     std::mutex connections_mutex_;
 

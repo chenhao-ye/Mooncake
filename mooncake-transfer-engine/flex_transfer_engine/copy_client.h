@@ -18,7 +18,9 @@ class FlexTransferEngine;
 struct ClientConnection {
     int fd;
     // it is expected that a connection is returned to cache while it still has
-    // a 4-byte finalized value
+    // a 4-byte finalized value (has_pending=True); this ensures a client can
+    // return as quick as possible once see a valid progress via RDMA, without
+    // waiting for socket
     bool has_pending;  // if true, this fd has a 4-byte value to read
     std::string server_url;
     ClientConnection(int fd, const std::string &server_url)

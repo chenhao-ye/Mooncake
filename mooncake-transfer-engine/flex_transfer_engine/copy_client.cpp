@@ -15,7 +15,8 @@
 #include "util.h"
 
 CopyClient::~CopyClient() {
-    for (const auto &[_, conn] : connection_cache_) conn->free();
+    for (const auto &[_, conn] : connection_cache_)
+        if (conn) conn->free();
 }
 
 ClientConnection *CopyClient::allocConnection(const std::string &server_url) {

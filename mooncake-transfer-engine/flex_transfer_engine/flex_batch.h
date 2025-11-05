@@ -27,7 +27,7 @@ class FlexBatch {
           copy_ctrl_block_(nullptr),
           client_conn_(nullptr) {}
 
-    ~FlexBatch();
+    ~FlexBatch() { free(); }
 
     void addReadRequest(uintptr_t local_addr, uintptr_t remote_addr,
                         uint64_t size);
@@ -52,10 +52,20 @@ class FlexBatch {
      */
     int getTransferStatus(size_t task_id);
 
+    void free();
+
    private:
     std::shared_ptr<FlexTransferEngine> engine_;
-    batch_id_t batch_id_;
-    CopyCtrlBlock *copy_ctrl_block_;
-    ClientConnection *client_conn_;  // For copy-based transfers
     std::vector<transfer_request_t> entries_;
+
+    // for direct transfer
+    batch_id_t batch_id_;
+
+    // for copy transfer
+    CopyCtrlBlock *copy_ctrl_block_;
+    // once see a progress that implies fully finished OR received a int32_t
+    // from the socket, it means this batch is done with the connection; then
+    // set client_conn_ to nullptr
+    ClientConnection *client_conn_;
+    int64_t last_progress_;
 };

@@ -1,6 +1,10 @@
 #pragma once
 
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -11,18 +15,27 @@
 struct CopyCtrlBlock;
 class FlexTransferEngine;
 
-// Client-side connection state (combines fd + progress tracking)
 struct ClientConnection {
     int fd;
-    int64_t last_progress;
-    bool finalized_received;
-    int32_t finalized_value;
+    // it is expected that a connection is returned to cache while it still has
+    // a 4-byte finalized value
+    bool has_pending;  // if true, this fd has a 4-byte value to read
+    std::string server_url;
+    ClientConnection(int fd, const std::string &server_url)
+        : fd(fd), has_pending(false), server_url(server_url) {}
 
-    ClientConnection(int fd)
-        : fd(fd),
-          last_progress(0),
-          finalized_received(false),
-          finalized_value(0) {}
+    void clear_pending() {
+        if (!has_pending) return;
+        int32_t dummy;
+        ssize_t nbytes = recv(fd, &dummy, sizeof(dummy), 0);
+        if (nbytes != sizeof(dummy))
+            throw std::runtime_error("Fail to clear ClientConnection");
+    }
+
+    void free() {
+        if (fd >= 0) close(fd);
+        fd = -1;
+    }
 };
 
 /**
@@ -35,16 +48,20 @@ class CopyClient {
     CopyClient(FlexTransferEngine &engine) : engine_(engine) {}
     ~CopyClient();
 
+    ClientConnection *allocConnection(const std::string &server_url);
+
+    void freeConnection(ClientConnection *conn);
+
     /**
      * Submit a batch of transfer requests to a remote CopyServer.
      * @param entries Vector of transfer requests
-     * @param server_url URL of remote CopyServer in format "ip:port"
+     * @param conn Connect to submit requests to
      * @param ctrl_block Control block for progress tracking
      * @return connection pointer
      */
-    ClientConnection *submitTransferToCopyServer(
-        std::vector<transfer_request_t> &entries, const std::string &server_url,
-        CopyCtrlBlock *ctrl_block);
+    void submitTransferToCopyServer(std::vector<transfer_request_t> &entries,
+                                    ClientConnection *conn,
+                                    CopyCtrlBlock *ctrl_block);
 
    private:
     /**
@@ -57,6 +74,6 @@ class CopyClient {
     FlexTransferEngine &engine_;
 
     // Cached TCP connections to remote CopyServers (server_url -> connection)
-    std::unordered_map<std::string, ClientConnection> copy_server_connections_;
-    std::mutex connections_mutex_;
+    std::unordered_map<std::string, ClientConnection *> connection_cache_;
+    std::mutex connection_cache_mutex_;
 };

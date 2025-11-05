@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -12,10 +13,19 @@
 #include "flex_transfer_engine.h"
 #include "transfer_engine_c.h"
 
-FlexBatch::~FlexBatch() {
-    if (copy_ctrl_block_) engine_->releaseCopyCtrlBlock(copy_ctrl_block_);
-    if (batch_id_ != INVALID_BATCH)
+void FlexBatch::free() {
+    if (batch_id_ != INVALID_BATCH) {
         ::freeBatchID(engine_->getEngine(), batch_id_);
+        batch_id_ = INVALID_BATCH;
+    }
+    if (copy_ctrl_block_) {
+        engine_->releaseCopyCtrlBlock(copy_ctrl_block_);
+        copy_ctrl_block_ = nullptr;
+    }
+    if (client_conn_) {
+        engine_->getCopyClient().freeConnection(client_conn_);
+        client_conn_ = nullptr;
+    }
 }
 
 void FlexBatch::addReadRequest(uintptr_t local_addr, uintptr_t remote_addr,
@@ -37,38 +47,6 @@ void FlexBatch::addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
                            .length = size});
 }
 
-// Helper function to check finalized progress from socket
-static int checkFinalizedProgress(ClientConnection *conn) {
-    if (!conn) return -1;
-
-    // Socket is already non-blocking (set during connection creation)
-    // Try to read the finalized int32_t from socket
-    int32_t finalized_value = 0;
-    ssize_t bytes_read =
-        recv(conn->fd, &finalized_value, sizeof(finalized_value), 0);
-
-    if (bytes_read == sizeof(finalized_value)) {
-        // Successfully read the finalized value
-        conn->finalized_received = true;
-        conn->finalized_value = finalized_value;
-        std::cerr << "Received finalized progress: " << finalized_value
-                  << std::endl;
-        return 0;
-    } else if (bytes_read == 0) {
-        // Connection closed
-        std::cerr << "Connection closed by server" << std::endl;
-        return -1;
-    } else if (bytes_read < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        // No data available yet
-        return 0;
-    } else {
-        // Error
-        std::cerr << "Error reading finalized progress: " << strerror(errno)
-                  << std::endl;
-        return -1;
-    }
-}
-
 int FlexBatch::submit(const std::string &target, bool is_target_copy) {
     if (entries_.empty()) return 0;
 
@@ -86,9 +64,10 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy) {
     }
     // else: copy-based transfer
     copy_ctrl_block_ = engine_->acquireCopyCtrlBlock();
-    if (!copy_ctrl_block_) return -1;
-    client_conn_ =
-        engine_->submitTransferToCopyServer(entries_, target, copy_ctrl_block_);
+    auto &copy_client = engine_->getCopyClient();
+    client_conn_ = copy_client.allocConnection(target);
+    copy_client.submitTransferToCopyServer(entries_, client_conn_,
+                                           copy_ctrl_block_);
     return 0;
 }
 
@@ -101,38 +80,51 @@ int FlexBatch::getTransferStatus(size_t task_id) {
         return status.status;
     }
 
-    // For copy-based transfers, check ctrl_block progress
-    assert(client_conn_);
+    if (static_cast<int64_t>(task_id) < last_progress_) return STATUS_COMPLETED;
 
-    int64_t progress;
+    // if client_conn_ is nullptr, it means this batch has been finalized, no
+    // more progress will be made
+    if (!client_conn_) return STATUS_FAILED;
 
-    // If we've already received the finalized value, use it
-    if (client_conn_->finalized_received) {
-        progress = client_conn_->finalized_value;
-    } else {
-        // Check the current progress counter
-        progress =
-            copy_ctrl_block_->progress_counter.load(std::memory_order_acquire);
-
-        // If progress hasn't changed, check the socket for finalized value
-        if (progress == client_conn_->last_progress) {
-            int rc = checkFinalizedProgress(client_conn_);
-            if (rc < 0) return STATUS_FAILED;  // Error occurred
-
-            // If finalized value was received, use it
-            if (client_conn_->finalized_received)
-                progress = client_conn_->finalized_value;
-        } else {  // progress has changed, update last_progress
-            client_conn_->last_progress = progress;
+    int64_t progress =
+        copy_ctrl_block_->progress_counter.load(std::memory_order_acquire);
+    assert(process >= last_progress_);
+    if (progress > last_progress_) {
+        last_progress_ = progress;
+        if (last_progress_ == static_cast<int64_t>(entries_.size())) {
+            // all done; finalize it (but keep pending=True)
+            engine_->getCopyClient().freeConnection(client_conn_);
+            client_conn_ = nullptr;
         }
+        return static_cast<int64_t>(task_id) < progress ? STATUS_COMPLETED
+                                                        : STATUS_WAITING;
     }
 
-    // Determine task status based on progress
-    if (static_cast<int64_t>(task_id) < progress) {  // Task completed
-        return STATUS_COMPLETED;
+    // check socket to see the server finalizes this connection
+    uint32_t finalized_value = 0;
+    ssize_t nbytes = recv(client_conn_->fd, &finalized_value,
+                          sizeof(finalized_value), MSG_DONTWAIT);
+
+    if (nbytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        return STATUS_WAITING;  // the server didn't finalize it
+
+    // finalized this batch: either the server has finalized it OR something
+    // went wrong
+    if (nbytes == sizeof(finalized_value)) {
+        last_progress_ = finalized_value;
+        client_conn_->has_pending = false;
+        engine_->getCopyClient().freeConnection(client_conn_);
     } else {
-        // if already finalized, the given task will never complete
-        return client_conn_->finalized_received ? STATUS_FAILED
-                                                : STATUS_WAITING;
+        // something went wrong, e.g., the server has closed the connection
+        // (nbytes=0) or the server crashed (nbytes<0 with unexpected errno)
+        client_conn_->free();
+        delete client_conn_;
+
+        // make one last check, just in case it happend during recv()
+        last_progress_ =
+            copy_ctrl_block_->progress_counter.load(std::memory_order_acquire);
     }
+    client_conn_ = nullptr;
+    return static_cast<int64_t>(task_id) < last_progress_ ? STATUS_COMPLETED
+                                                          : STATUS_FAILED;
 }

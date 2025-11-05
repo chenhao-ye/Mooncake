@@ -193,7 +193,7 @@ void CopyServer::workerThread() {
 
         int activity =
             select(max_fd + 1, &read_fds, nullptr, nullptr, &timeout);
-        if (activity < 0 && errno != EINTR) {
+        if (activity < 0) {
             std::cerr << "select error: " << strerror(errno) << std::endl;
             continue;
         }
@@ -391,6 +391,13 @@ void CopyServer::handleAndProcessRequest(int client_fd) {
                 }
                 num_completed++;
             }
+
+            /**
+             Ordering guarantee: progress counter update must be finished before
+             return any value from the socket. In other words, once received a
+             int32_t from the socket, the client can safely assume there will be
+             no more update to the progress counter.
+             */
 
             // Update progress to indicate completion via RDMA
             {

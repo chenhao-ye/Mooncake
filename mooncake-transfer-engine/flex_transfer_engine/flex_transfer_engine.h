@@ -104,6 +104,8 @@ class FlexTransferEngine {
     // for CopyServer and FlexBatch
     transfer_engine_t getEngine() { return engine_; }
 
+    CopyClient &getCopyClient() { return copy_client_; }
+
     // for CopyClient
     const std::string &getLocalServerName() const { return local_server_name_; }
 
@@ -112,14 +114,6 @@ class FlexTransferEngine {
     CopyCtrlBlock *acquireCopyCtrlBlock();
 
     void releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block);
-
-    // Delegate to CopyClient
-    ClientConnection *submitTransferToCopyServer(
-        std::vector<transfer_request_t> &entries, const std::string &server_url,
-        CopyCtrlBlock *ctrl_block) {
-        return copy_client_.submitTransferToCopyServer(entries, server_url,
-                                                       ctrl_block);
-    }
 
    private:
     std::string local_server_name_;

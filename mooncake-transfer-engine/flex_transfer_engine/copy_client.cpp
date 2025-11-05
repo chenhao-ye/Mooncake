@@ -15,36 +15,37 @@
 #include "util.h"
 
 CopyClient::~CopyClient() {
-    for (const auto &[_, conn] : copy_server_connections_) close(conn.fd);
+    for (const auto &[_, conn] : connection_cache_) conn->free();
 }
 
-ClientConnection *CopyClient::submitTransferToCopyServer(
-    std::vector<transfer_request_t> &entries, const std::string &server_url,
+ClientConnection *CopyClient::allocConnection(const std::string &server_url) {
+    std::lock_guard<std::mutex> lock(connection_cache_mutex_);
+    ClientConnection *conn = connection_cache_[server_url];
+
+    if (conn) {
+        connection_cache_[server_url] = nullptr;
+        conn->clear_pending();
+        return conn;
+    }
+
+    int fd = connectToCopyServer(server_url);
+    conn = new ClientConnection(fd, server_url);
+    return conn;
+}
+
+void CopyClient::freeConnection(ClientConnection *conn) {
+    // if possible, return to the cache
+    auto &prev_conn = connection_cache_[conn->server_url];
+    if (!prev_conn) prev_conn = conn;
+    // otherwise, close this connection and free it
+    conn->free();
+    delete conn;
+}
+
+void CopyClient::submitTransferToCopyServer(
+    std::vector<transfer_request_t> &entries, ClientConnection *conn,
     CopyCtrlBlock *ctrl_block) {
     assert(ctrl_block);
-
-    // Connect to the remote CopyServer (or reuse existing connection)
-    ClientConnection *conn = nullptr;
-    int fd = -1;
-    {
-        std::lock_guard<std::mutex> lock(connections_mutex_);
-        auto it = copy_server_connections_.find(server_url);
-        if (it != copy_server_connections_.end()) {
-            conn = &it->second;
-            fd = conn->fd;
-            // Reset progress tracking for new batch
-            // TODO: clear if not finalized; check fd validity
-            conn->last_progress = 0;
-            conn->finalized_received = false;
-            conn->finalized_value = 0;
-        } else {
-            fd = connectToCopyServer(server_url);
-            auto result = copy_server_connections_.emplace(
-                std::piecewise_construct, std::forward_as_tuple(server_url),
-                std::forward_as_tuple(fd));
-            conn = &result.first->second;
-        }
-    }
 
     // Send protocol to remote CopyServer:
     // 1. Segment name length (4 bytes)
@@ -57,6 +58,7 @@ ClientConnection *CopyClient::submitTransferToCopyServer(
     // Get local server name from FlexTransferEngine
     const std::string &local_server_name = engine_.getLocalServerName();
 
+    int fd = conn->fd;
     ssize_t nbytes;
 
     // Send segment name length
@@ -113,8 +115,8 @@ ClientConnection *CopyClient::submitTransferToCopyServer(
     // poll the progress to check completion.
 
     std::cerr << "Submitted " << entries.size() << " requests to CopyServer at "
-              << server_url << std::endl;
-    return conn;
+              << conn->server_url << std::endl;
+    conn->has_pending = true;
 }
 
 int CopyClient::connectToCopyServer(const std::string &server_url) {
@@ -178,10 +180,6 @@ int CopyClient::connectToCopyServer(const std::string &server_url) {
     freeaddrinfo(result);
 
     if (fd < 0) throw std::runtime_error("Failed to connect to " + server_url);
-
-    // Set socket to non-blocking for progress checking
-    int flags = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
     std::cerr << "Connected to CopyServer at " << server_url << std::endl;
     return fd;

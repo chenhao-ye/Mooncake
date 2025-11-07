@@ -277,7 +277,8 @@ int TcpTransport::registerLocalMemoryBatch(
     const std::vector<Transport::BufferEntry> &buffer_list,
     const std::string &location) {
     for (auto &buffer : buffer_list)
-        registerLocalMemory(buffer.addr, buffer.length, location, true, false);
+        registerLocalMemory(buffer.addr, buffer.length, location, true, false,
+                            false);
     return metadata_->updateLocalSegmentDesc();
 }
 

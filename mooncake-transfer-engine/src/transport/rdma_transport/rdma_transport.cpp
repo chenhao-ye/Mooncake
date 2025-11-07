@@ -94,7 +94,7 @@ int RdmaTransport::registerLocalMemory(void *addr, size_t length,
                         IBV_ACCESS_REMOTE_WRITE |
                         IBV_ACCESS_REMOTE_READ;
     if (remote_atomic) access_rights |= IBV_ACCESS_REMOTE_ATOMIC;
-    
+
     for (auto &context : context_list_) {
         int ret = context->registerMemoryRegion(addr, length, access_rights);
         if (ret) return ret;
@@ -162,7 +162,7 @@ int RdmaTransport::registerLocalMemoryBatch(
         results.emplace_back(
             std::async(std::launch::async, [this, buffer, location]() -> int {
                 return registerLocalMemory(buffer.addr, buffer.length, location,
-                                           true, false);
+                                           true, false, false);
             }));
     }
 

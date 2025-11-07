@@ -30,6 +30,7 @@ extern "C" {
 
 #define OPCODE_READ (0)
 #define OPCODE_WRITE (1)
+#define OPCODE_ATOMIC_READ (2)
 
 struct transfer_request {
     int opcode;

@@ -75,7 +75,7 @@ NVMeoFTransport::BatchID NVMeoFTransport::allocateBatchID(size_t batch_size) {
 }
 
 Status NVMeoFTransport::getTransferStatus(BatchID batch_id, size_t task_id,
-                                       TransferStatus &status) {
+                                          TransferStatus &status) {
     auto &batch_desc = *((BatchDesc *)(batch_id));
     auto &task = batch_desc.task_list[task_id];
     auto &nvmeof_desc = *((NVMeoFBatchDesc *)(batch_desc.context));
@@ -119,7 +119,7 @@ Status NVMeoFTransport::submitTransfer(
 
     if (batch_desc.task_list.size() + entries.size() > batch_desc.batch_size) {
         LOG(ERROR) << "NVMeoFTransport: Exceed the limitation of current batch's "
-                      "capacity";
+               "capacity";
         return Status::InvalidArgument(
             "NVMeoFTransport: Exceed the limitation of capacity, batch id: " +
             std::to_string(batch_id));
@@ -269,7 +269,7 @@ void NVMeoFTransport::addSliceToCUFileBatch(
     CUfileIOParams_t params;
     params.mode = CUFILE_BATCH;
     params.opcode =
-        op == Transport::TransferRequest::READ ? CUFILE_READ : CUFILE_WRITE;
+        op == Transport::TransferRequest::WRITE ? CUFILE_WRITE : CUFILE_READ;
     params.cookie = (void *)0;
     params.u.batch.devPtr_base = source_addr;
     params.u.batch.devPtr_offset = 0;

@@ -282,21 +282,31 @@ int RdmaEndPoint::submitPostSend(
         auto slice = slice_list[i];
         auto &sge = sge_list[i];
         sge.addr = (uint64_t)slice->source_addr;
-        sge.length = slice->length;
         sge.lkey = slice->rdma.source_lkey;
 
         auto &wr = wr_list[i];
         wr.wr_id = (uint64_t)slice;
-        wr.opcode = slice->opcode == Transport::TransferRequest::READ
-                        ? IBV_WR_RDMA_READ
-                        : IBV_WR_RDMA_WRITE;
+        if (slice->opcode == Transport::TransferRequest::ATOMIC_FETCH_ADD) {
+            sge.length = 8;
+            wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
+            wr.wr.atomic.remote_addr = slice->rdma.dest_addr;
+            wr.wr.atomic.rkey = slice->rdma.dest_rkey;
+            // the length field is overloaded as atomic operand, because the
+            // length must be 8
+            wr.wr.atomic.compare_add = slice->length;
+        } else {
+            sge.length = slice->length;
+            wr.opcode = slice->opcode == Transport::TransferRequest::READ
+                            ? IBV_WR_RDMA_READ
+                            : IBV_WR_RDMA_WRITE;
+            wr.wr.rdma.remote_addr = slice->rdma.dest_addr;
+            wr.wr.rdma.rkey = slice->rdma.dest_rkey;
+        }
         wr.num_sge = 1;
         wr.sg_list = &sge;
         wr.send_flags = IBV_SEND_SIGNALED;
         wr.next = (i + 1 == wr_count) ? nullptr : &wr_list[i + 1];
         wr.imm_data = 0;
-        wr.wr.rdma.remote_addr = slice->rdma.dest_addr;
-        wr.wr.rdma.rkey = slice->rdma.dest_rkey;
         slice->ts = getCurrentTimeInNano();
         slice->status = Transport::Slice::POSTED;
         slice->rdma.qp_depth = &wr_depth_list_[qp_index];

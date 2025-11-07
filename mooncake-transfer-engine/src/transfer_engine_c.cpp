@@ -83,10 +83,11 @@ int removeLocalSegment(transfer_engine_t engine, const char *segment_name) {
 }
 
 int registerLocalMemory(transfer_engine_t engine, void *addr, size_t length,
-                        const char *location, int remote_accessible) {
+                        const char *location, int remote_accessible,
+                        int remote_atomic) {
     TransferEngine *native = (TransferEngine *)engine;
     return native->registerLocalMemory(addr, length, location,
-                                       remote_accessible, true);
+                                       remote_accessible, remote_atomic, true);
 }
 
 int unregisterLocalMemory(transfer_engine_t engine, void *addr) {

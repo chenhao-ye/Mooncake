@@ -258,7 +258,9 @@ int TcpTransport::allocateLocalSegmentID() {
 int TcpTransport::registerLocalMemory(void *addr, size_t length,
                                       const std::string &location,
                                       bool remote_accessible,
+                                      bool remote_atomic,
                                       bool update_metadata) {
+    (void)remote_atomic;
     (void)remote_accessible;
     BufferDesc buffer_desc;
     buffer_desc.name = local_server_name_;
@@ -275,7 +277,8 @@ int TcpTransport::registerLocalMemoryBatch(
     const std::vector<Transport::BufferEntry> &buffer_list,
     const std::string &location) {
     for (auto &buffer : buffer_list)
-        registerLocalMemory(buffer.addr, buffer.length, location, true, false);
+        registerLocalMemory(buffer.addr, buffer.length, location, true, false,
+                            false);
     return metadata_->updateLocalSegmentDesc();
 }
 

@@ -62,6 +62,7 @@ int CxlTransport::install(std::string &local_server_name,
 int CxlTransport::registerLocalMemory(void *addr, size_t length,
                                       const string &location,
                                       bool remote_accessible,
+                                      bool remote_atomic,
                                       bool update_metadata) {
     return 0;
 }

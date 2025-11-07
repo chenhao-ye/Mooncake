@@ -30,6 +30,7 @@ extern "C" {
 
 #define OPCODE_READ (0)
 #define OPCODE_WRITE (1)
+#define OPCODE_ATOMIC_FETCH_ADD (2)
 
 struct transfer_request {
     int opcode;
@@ -117,7 +118,8 @@ int removeLocalSegment(transfer_engine_t engine, const char *segment_name);
 void destroyTransferEngine(transfer_engine_t engine);
 
 int registerLocalMemory(transfer_engine_t engine, void *addr, size_t length,
-                        const char *location, int remote_accessible);
+                        const char *location, int remote_accessible,
+                        int remote_atomic);
 
 int unregisterLocalMemory(transfer_engine_t engine, void *addr);
 

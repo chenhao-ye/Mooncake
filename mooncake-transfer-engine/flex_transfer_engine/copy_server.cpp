@@ -314,7 +314,7 @@ int CopyServer::processRequest(int client_fd) {
         ::submitTransfer(engine_.getEngine(), batch_id, &progress_req, 1);
 
         // Wait for completion
-        transfer_status_t status{.status = STATUS_FAILED};
+        transfer_status_t status{STATUS_FAILED, 0};
         while (::getTransferStatus(engine_.getEngine(), batch_id, 0, &status) ==
                    0 &&
                status.status == STATUS_WAITING) {

@@ -112,19 +112,27 @@ int FlexBatch::getTransferStatus(size_t task_id) {
     // went wrong
     if (nbytes == sizeof(finalized_value)) {
         last_progress_ = finalized_value;
-        client_conn_->has_pending = false;
-        engine_->getCopyClient().freeConnection(client_conn_);
-    } else {
-        // something went wrong, e.g., the server has closed the connection
-        // (nbytes=0) or the server crashed (nbytes<0 with unexpected errno)
-        client_conn_->free();
-        delete client_conn_;
-
-        // make one last check, just in case it happend during recv()
-        last_progress_ =
-            copy_ctrl_block_->progress_counter.load(std::memory_order_acquire);
+        if (last_progress_ == static_cast<int64_t>(entries_.size())) {
+            // all done; finalize it and mark it with no pending
+            client_conn_->has_pending = false;
+            engine_->getCopyClient().freeConnection(client_conn_);
+            goto check_last;
+        }
     }
+
+    // something went wrong so that we need to close this connection, e.g.,
+    // - the server has closed the connection (nbytes=0) OR
+    // - the server crashed (nbytes<0 with unexpected errno) OR 
+    // - the finalized value is not an expected value
+    client_conn_->free();
+    delete client_conn_;
     client_conn_ = nullptr;
+
+    // make one last check, just in case it happend during recv()
+    last_progress_ =
+        copy_ctrl_block_->progress_counter.load(std::memory_order_acquire);
+
+check_last:
     return static_cast<int64_t>(task_id) < last_progress_ ? STATUS_COMPLETED
                                                           : STATUS_FAILED;
 }

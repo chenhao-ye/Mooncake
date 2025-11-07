@@ -51,13 +51,13 @@ class Transport {
     using HandShakeDesc = TransferMetadata::HandShakeDesc;
 
     struct TransferRequest {
-        enum OpCode { READ, WRITE, ATOMIC_READ };
+        enum OpCode { READ, WRITE, ATOMIC_FETCH_ADD };
 
         OpCode opcode;
         void *source;
         SegmentID target_id;
         uint64_t target_offset;
-        size_t length;
+        size_t length;  // for ATOMIC_FETCH_ADD, will be overloaded as operand
         int advise_retry_cnt = 0;
     };
 

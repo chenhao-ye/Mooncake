@@ -16,6 +16,7 @@
 #include <stdexcept>
 
 #include "flex_transfer_engine.h"
+#include "transfer_engine_c.h"
 #include "util.h"
 
 #ifdef USE_CUDA
@@ -220,9 +221,19 @@ void CopyServer::workerThread() {
         }
 
         // Check for data on existing connections (process one at a time)
-        for (int client_fd : active_client_fds_) {
+        for (auto it = active_client_fds_.begin();
+             it != active_client_fds_.end(); ++it) {
+            int client_fd = *it;
             if (FD_ISSET(client_fd, &read_fds)) {
-                processRequest(client_fd);
+                // Process the request and check for errors
+                int rc = processRequest(client_fd);
+                if (rc != 0) {
+                    // Error occurred or client disconnected, close and remove
+                    std::cerr << "Closing client connection fd=" << client_fd
+                              << std::endl;
+                    close(client_fd);
+                    active_client_fds_.erase(it);
+                }
                 break;  // Process only one request per iteration
             }
         }
@@ -235,7 +246,8 @@ void CopyServer::workerThread() {
     std::cerr << "Worker thread stopped" << std::endl;
 }
 
-void CopyServer::processRequest(int client_fd) {
+int CopyServer::processRequest(int client_fd) {
+    bool success = false;
     int32_t num_completed = 0;
     std::vector<Task> tasks;
     CopyCtrlBlock *copy_ctrl_block = nullptr;
@@ -302,13 +314,14 @@ void CopyServer::processRequest(int client_fd) {
         ::submitTransfer(engine_.getEngine(), batch_id, &progress_req, 1);
 
         // Wait for completion
-        transfer_status_t status;
+        transfer_status_t status{.status = STATUS_FAILED};
         while (::getTransferStatus(engine_.getEngine(), batch_id, 0, &status) ==
                    0 &&
-               status.status != STATUS_COMPLETED) {
-            usleep(1);
+               status.status == STATUS_WAITING) {
+            // usleep(1);
         }
         ::freeBatchID(engine_.getEngine(), batch_id);
+        success = status.status == STATUS_COMPLETED;
     }
 
     std::cerr << "Completed transfer request: " << num_completed << " tasks"
@@ -316,17 +329,25 @@ void CopyServer::processRequest(int client_fd) {
 
 cleanup:
     // Clean up any pending tasks
-    for (auto &task : tasks) {
-        int rc = waitTask(task);
+    for (size_t task_idx = num_completed; task_idx < tasks.size(); ++task_idx) {
+        int rc = waitTask(tasks[task_idx]);
         if (rc) std::cerr << "Failed to wait for task completion" << std::endl;
     }
 
     if (copy_ctrl_block) engine_.releaseCopyCtrlBlock(copy_ctrl_block);
+
     // Send completion count via socket (i.e., num_completed)
+    // If this fails, the connection should be closed
     if (writeFully(client_fd, &num_completed, sizeof(num_completed)) !=
         sizeof(num_completed)) {
-        std::cerr << "Failed to send completion count" << std::endl;
+        std::cerr << "Failed to send completion count, closing connection"
+                  << std::endl;
+        return -1;
     }
+
+    // Return 0 on success, or -1 if any error occurred during processing
+    // (Errors during processing would have set num_completed appropriately)
+    return success ? 0 : -1;
 }
 
 // read segment name from fd and write into segment_name

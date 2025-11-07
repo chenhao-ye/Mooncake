@@ -140,7 +140,8 @@ class CopyServer {
 
     void workerThread();
 
-    void processRequest(int client_fd);
+    // Returns 0 on success, -1 on error (connection should be closed)
+    int processRequest(int client_fd);
 
     // read segment name from fd and write into segment_name
     int readSegmentName(int client_fd, std::string &segment_name);

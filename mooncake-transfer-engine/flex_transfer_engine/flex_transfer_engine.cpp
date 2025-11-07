@@ -74,13 +74,14 @@ FlexTransferEngine::~FlexTransferEngine() {
 
 int FlexTransferEngine::registerLocalMemory(uintptr_t addr, size_t length,
                                             const std::string &location,
-                                            int remote_accessible,
+                                            bool remote_accessible,
+                                            bool remote_atomic,
                                             bool force_direct) {
     // do actual RDMA registration
     if (force_direct || !enable_copy_) {
         return ::registerLocalMemory(engine_, reinterpret_cast<void *>(addr),
                                      length, location.c_str(),
-                                     remote_accessible);
+                                     remote_accessible, remote_atomic);
     } else {  // register for copy-based transfer
         return copy_server_.registerLocalMemory(reinterpret_cast<void *>(addr),
                                                 length, location);
@@ -147,7 +148,8 @@ CopyCtrlBlock *FlexTransferEngine::acquireCopyCtrlBlock() {
     // Register it with RDMA using the specified location
     int rc = ::registerLocalMemory(engine_, ctrl_block, sizeof(CopyCtrlBlock),
                                    ctrl_block_location_.c_str(),
-                                   /*remote_accessible*/ true);
+                                   /*remote_accessible*/ true,
+                                   /*remote_atomic*/ true);
     if (rc) {
         delete ctrl_block;
         return nullptr;

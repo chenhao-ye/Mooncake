@@ -60,8 +60,8 @@ class FlexTransferEngine {
      * enable_copy_ is true
      */
     int registerLocalMemory(uintptr_t addr, size_t length,
-                            const std::string &location, int remote_accessible,
-                            bool force_direct = false);
+                            const std::string &location, bool remote_accessible,
+                            bool remote_atomic, bool force_direct = false);
 
     /**
      * Unregister local memory.

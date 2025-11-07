@@ -594,9 +594,9 @@ CopyServer::BufferPair *CopyServer::allocBufferPair(LocIdx loc_idx,
     }
 
     // Register the entire contiguous buffer with RDMA
-    int rc = ::registerLocalMemory(engine_.getEngine(), buffer_base, total_size,
-                                   location.c_str(),
-                                   /*remote_accessible*/ true);
+    int rc = ::registerLocalMemory(
+        engine_.getEngine(), buffer_base, total_size, location.c_str(),
+        /*remote_accessible*/ true, /*remote_atomic*/ false);
     if (rc) {
         if (is_cuda) {
 #ifdef USE_CUDA

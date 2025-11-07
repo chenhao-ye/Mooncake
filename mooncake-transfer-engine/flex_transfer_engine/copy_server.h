@@ -17,7 +17,11 @@ class FlexTransferEngine;
 class CopyServer {
    public:
     CopyServer(FlexTransferEngine &engine)
-        : worker_running_(false), listener_fd_(-1), engine_(engine) {}
+        : worker_running_(false),
+          listener_fd_(-1),
+          stop_event_fd_(-1),
+          epoll_fd_(-1),
+          engine_(engine) {}
 
     // must called in FlexTransferEngine's dtor, because it relies on a valid
     // TransferEngine
@@ -112,6 +116,8 @@ class CopyServer {
     std::thread worker_thread_;
     std::atomic<bool> worker_running_;
     int listener_fd_;
+    int stop_event_fd_;  // eventfd to signal worker thread to stop
+    int epoll_fd_;       // epoll instance for I/O multiplexing
     std::string local_copy_server_url_;
 
     // Back pointer to FlexTransferEngine

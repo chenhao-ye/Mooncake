@@ -4,10 +4,12 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <sys/select.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -147,6 +149,37 @@ void CopyServer::startListener() {
     std::cerr << "TCP listener started on " << local_copy_server_url_
               << std::endl;
 
+    // Create eventfd for stopping the worker thread
+    stop_event_fd_ = eventfd(0, EFD_NONBLOCK);
+    if (stop_event_fd_ < 0) {
+        throw std::runtime_error("Failed to create eventfd: " +
+                                 std::string(strerror(errno)));
+    }
+
+    // Create epoll instance
+    epoll_fd_ = epoll_create1(0);
+    if (epoll_fd_ < 0) {
+        throw std::runtime_error("Failed to create epoll instance: " +
+                                 std::string(strerror(errno)));
+    }
+
+    // Add listener_fd to epoll
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = listener_fd_;
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, listener_fd_, &ev) < 0) {
+        throw std::runtime_error("Failed to add listener to epoll: " +
+                                 std::string(strerror(errno)));
+    }
+
+    // Add stop_event_fd to epoll
+    ev.events = EPOLLIN;
+    ev.data.fd = stop_event_fd_;
+    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, stop_event_fd_, &ev) < 0) {
+        throw std::runtime_error("Failed to add stop_event_fd to epoll: " +
+                                 std::string(strerror(errno)));
+    }
+
     // finally, start worker thread
     worker_running_ = true;
     worker_thread_ = std::thread(&CopyServer::workerThread, this);
@@ -155,13 +188,28 @@ void CopyServer::startListener() {
 void CopyServer::stopListener() {
     if (worker_running_.load(std::memory_order_acquire)) {
         worker_running_.store(false, std::memory_order_release);
-        // Wait for worker thread to finish
+
+        // Signal the eventfd to wake up the worker thread
+        if (stop_event_fd_ >= 0) {
+            uint64_t event_value = 1;
+            write(stop_event_fd_, &event_value, sizeof(event_value));
+        }
+
         if (worker_thread_.joinable()) worker_thread_.join();
 
-        // Close listener socket to unblock accept()
+        if (epoll_fd_ >= 0) {
+            close(epoll_fd_);
+            epoll_fd_ = -1;
+        }
+
         if (listener_fd_ >= 0) {
             close(listener_fd_);
             listener_fd_ = -1;
+        }
+
+        if (stop_event_fd_ >= 0) {
+            close(stop_event_fd_);
+            stop_event_fd_ = -1;
         }
 
         std::cerr << "TCP listener stopped" << std::endl;
@@ -175,69 +223,79 @@ void CopyServer::workerThread() {
     int flags = fcntl(listener_fd_, F_GETFL, 0);
     fcntl(listener_fd_, F_SETFL, flags | O_NONBLOCK);
 
+    const int MAX_EVENTS = 64;
+    struct epoll_event events[MAX_EVENTS];
+
     while (worker_running_.load(std::memory_order_acquire)) {
-        fd_set read_fds;
-        FD_ZERO(&read_fds);
-        FD_SET(listener_fd_, &read_fds);
-
-        int max_fd = listener_fd_;
-
-        // Add all active client connections to the set
-        for (int client_fd : active_client_fds_) {
-            FD_SET(client_fd, &read_fds);
-            if (client_fd > max_fd) max_fd = client_fd;
-        }
-
-        // Use select with timeout to allow checking worker_running_
-        struct timeval timeout;
-        timeout.tv_sec = 1;  // 1s
-        timeout.tv_usec = 0;
-
-        int activity =
-            select(max_fd + 1, &read_fds, nullptr, nullptr, &timeout);
-        if (activity < 0) {
-            std::cerr << "select error: " << strerror(errno) << std::endl;
+        // Wait for events
+        int nfds = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
+        if (nfds < 0) {
+            if (errno == EINTR) continue;
+            std::cerr << "epoll_wait error: " << strerror(errno) << std::endl;
             continue;
         }
 
-        if (activity == 0) continue;  // timeout
+        // Process all ready events
+        for (int i = 0; i < nfds; ++i) {
+            int ready_fd = events[i].data.fd;
 
-        // Check for new connections on listener
-        if (FD_ISSET(listener_fd_, &read_fds)) {
-            struct sockaddr_in client_addr;
-            socklen_t client_len = sizeof(client_addr);
-
-            int client_fd = accept(
-                listener_fd_, (struct sockaddr *)&client_addr, &client_len);
-            if (client_fd >= 0) {
-                char client_ip[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &client_addr.sin_addr, client_ip,
-                          sizeof(client_ip));
-                std::cerr << "Accepted connection from " << client_ip << ":"
-                          << ntohs(client_addr.sin_port) << std::endl;
-
-                active_client_fds_.push_back(client_fd);
+            // Check if we were signaled to stop
+            if (ready_fd == stop_event_fd_) {
+                uint64_t event_value;
+                read(stop_event_fd_, &event_value, sizeof(event_value));
+                goto cleanup;  // Exit the worker thread loop
             }
-        }
 
-        // Check for data on existing connections (process one at a time)
-        for (auto it = active_client_fds_.begin();
-             it != active_client_fds_.end(); ++it) {
-            int client_fd = *it;
-            if (FD_ISSET(client_fd, &read_fds)) {
-                // Process the request and check for errors
-                int rc = processRequest(client_fd);
-                if (rc != 0) {
-                    // Error occurred or client disconnected, close and remove
-                    std::cerr << "Closing client connection fd=" << client_fd
-                              << std::endl;
-                    close(client_fd);
-                    active_client_fds_.erase(it);
+            // Check for new connections on listener
+            if (ready_fd == listener_fd_) {
+                struct sockaddr_in client_addr;
+                socklen_t client_len = sizeof(client_addr);
+
+                int client_fd = accept(
+                    listener_fd_, (struct sockaddr *)&client_addr, &client_len);
+                if (client_fd >= 0) {
+                    char client_ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip,
+                              sizeof(client_ip));
+                    std::cerr << "Accepted connection from " << client_ip << ":"
+                              << ntohs(client_addr.sin_port) << std::endl;
+
+                    // Add new client to epoll
+                    struct epoll_event ev;
+                    ev.events = EPOLLIN;
+                    ev.data.fd = client_fd;
+                    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev) <
+                        0) {
+                        std::cerr << "Failed to add client to epoll: "
+                                  << strerror(errno) << std::endl;
+                        close(client_fd);
+                    } else {
+                        active_client_fds_.push_back(client_fd);
+                    }
                 }
-                break;  // Process only one request per iteration
+                continue;
+            }
+
+            // Handle client data
+            int rc = processRequest(ready_fd);
+            if (rc != 0) {
+                // Error occurred or client disconnected, close and remove
+                std::cerr << "Closing client connection fd=" << ready_fd
+                          << std::endl;
+
+                // Remove from epoll
+                epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, ready_fd, nullptr);
+                close(ready_fd);
+
+                // Remove from active_client_fds_
+                auto it = std::find(active_client_fds_.begin(),
+                                    active_client_fds_.end(), ready_fd);
+                active_client_fds_.erase(it);
             }
         }
     }
+
+cleanup:
 
     // Clean up all active connections
     for (int client_fd : active_client_fds_) close(client_fd);

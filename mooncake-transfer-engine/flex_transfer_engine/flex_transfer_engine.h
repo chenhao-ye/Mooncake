@@ -21,7 +21,10 @@ class FlexTransferEngine;
 
 struct CopyCtrlBlock {
     volatile std::atomic_int64_t progress_counter = 0;
+    uint64_t padding[7];
 };
+
+static_assert(sizeof(CopyCtrlBlock) == 64, "CopyCtrlBlock must be 64-byte");
 
 /**
  * FlexTransferEngine is a flexible wrapper on top of TransferEngine that

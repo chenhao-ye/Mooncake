@@ -87,6 +87,8 @@ int FlexTransferEngine::registerLocalMemory(uintptr_t addr, size_t length,
         if (rc) return rc;
     }
     if (mode & TransferMode::Copy) {
+        if (!enable_copy_)
+            throw std::invalid_argument("Copy mode was not enabled");
         rc = copy_server_.registerLocalMemory(reinterpret_cast<void *>(addr),
                                               length, location);
         if (rc) return rc;
@@ -115,6 +117,8 @@ int FlexTransferEngine::unregisterLocalMemory(uintptr_t addr,
     // Note if there are duplicated address, copy_server_.unregisterLocalMemory
     // can return an error
     if (mode & TransferMode::Copy) {
+        if (!enable_copy_)
+            throw std::invalid_argument("Copy mode was not enabled");
         rc = copy_server_.unregisterLocalMemory(reinterpret_cast<void *>(addr));
         if (rc) return rc;
     }
@@ -134,6 +138,8 @@ int FlexTransferEngine::registerLocalMemoryBatch(
         if (rc) return rc;
     }
     if (mode & TransferMode::Copy) {
+        if (!enable_copy_)
+            throw std::invalid_argument("Copy mode was not enabled");
         rc = copy_server_.registerLocalMemoryBatch(buffer_list, location);
         if (rc) return rc;
     }
@@ -161,6 +167,8 @@ int FlexTransferEngine::unregisterLocalMemoryBatch(
         if (rc) return rc;
     }
     if (mode & TransferMode::Copy) {
+        if (!enable_copy_)
+            throw std::invalid_argument("Copy mode was not enabled");
         rc = copy_server_.unregisterLocalMemoryBatch(addr_list);
         if (rc) return rc;
     }

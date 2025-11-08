@@ -280,7 +280,7 @@ int TransferEngine::registerLocalMemoryBatch(
     std::unique_lock<std::shared_mutex> lock(mutex_);
     for (auto &buffer : buffer_list) {
         local_memory_regions_.push_back(
-            {buffer.addr, buffer.length, location, true});
+            {buffer.addr, buffer.length, location, true, false});
     }
     return 0;
 }

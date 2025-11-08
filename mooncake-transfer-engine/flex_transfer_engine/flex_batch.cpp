@@ -88,7 +88,7 @@ int FlexBatch::getTransferStatus(size_t task_id) {
 
     int64_t progress =
         copy_ctrl_block_->progress_counter.load(std::memory_order_acquire);
-    assert(process >= last_progress_);
+    assert(progress >= last_progress_);
     if (progress > last_progress_) {
         last_progress_ = progress;
         if (last_progress_ == static_cast<int64_t>(entries_.size())) {

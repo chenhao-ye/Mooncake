@@ -35,9 +35,14 @@ ClientConnection *CopyClient::allocConnection(const std::string &server_url) {
 }
 
 void CopyClient::freeConnection(ClientConnection *conn) {
-    // if possible, return to the cache
-    auto &prev_conn = connection_cache_[conn->server_url];
-    if (!prev_conn) prev_conn = conn;
+    {  // if possible, return to the cache
+        std::lock_guard<std::mutex> lock(connection_cache_mutex_);
+        auto &prev_conn = connection_cache_[conn->server_url];
+        if (!prev_conn) {
+            prev_conn = conn;
+            return;
+        }
+    }
     // otherwise, close this connection and free it
     conn->free();
     delete conn;

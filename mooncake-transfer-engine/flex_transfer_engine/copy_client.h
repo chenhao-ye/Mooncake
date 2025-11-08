@@ -56,6 +56,7 @@ class CopyClient {
 
     /**
      * Submit a batch of transfer requests to a remote CopyServer.
+     * Assumption: the server machine uses the same endianness as the client.
      * @param entries Vector of transfer requests
      * @param conn Connect to submit requests to
      * @param ctrl_block Control block for progress tracking

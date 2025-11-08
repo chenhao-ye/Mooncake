@@ -141,7 +141,7 @@ class CopyServer {
     // Require regions_mutex_ to be held before calling
     void freeBufferPair(BufferPair *pair);
 
-    int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
+    void copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
     void workerThread();
 
@@ -166,8 +166,8 @@ class CopyServer {
     // progress update via atomic fetch-add, which will update prorgess_batch_id
     // and last_updated_progress
     int tryUpdateRemoteProgress(batch_id_t &prorgess_batch_id,
-                                uint64_t &last_updated_progress,
-                                int32_t num_completed,
+                                int32_t &last_updated_num_done,
+                                int32_t num_done,
                                 CopyCtrlBlock *copy_ctrl_block,
                                 segment_id_t target_segment_id,
                                 uint64_t target_progress_addr);
@@ -176,6 +176,7 @@ class CopyServer {
 
     // Submit a size=1 batch with the given request; will updates batch_id; if
     // fail, will free the batch and reset batch_id to INVALID_BATCH
+    // Return 0 for success; non-zero for error
     int submitBatch(batch_id_t &batch_id, transfer_request_t &req);
 
     // Free the batch and reset batch_id to INVALID_BATCH

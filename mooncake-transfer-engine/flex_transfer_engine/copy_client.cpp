@@ -61,14 +61,11 @@ void CopyClient::submitTransferToCopyServer(
     // 5. For each request: source_addr (8 bytes), target_addr (8 bytes), length
     // (8 bytes)
 
-    // Get local server name from FlexTransferEngine
-    const std::string &local_server_name = engine_.getLocalServerName();
-
     int fd = conn->fd;
     ssize_t nbytes;
 
     // Send segment name length
-    uint32_t segment_name_len = local_server_name.size();
+    uint32_t segment_name_len = local_segment_name_.size();
     nbytes = writeFully(fd, &segment_name_len, sizeof(segment_name_len));
     if (nbytes != sizeof(segment_name_len)) {
         throw std::runtime_error(
@@ -76,7 +73,7 @@ void CopyClient::submitTransferToCopyServer(
     }
 
     // Send segment name
-    nbytes = writeFully(fd, local_server_name.c_str(), segment_name_len);
+    nbytes = writeFully(fd, local_segment_name_.c_str(), segment_name_len);
     if (nbytes != segment_name_len)
         throw std::runtime_error("Failed to send segment name to CopyServer");
 

@@ -204,14 +204,14 @@ void CopyServer::stopListener() {
             epoll_fd_ = -1;
         }
 
-        if (listener_fd_ >= 0) {
-            close(listener_fd_);
-            listener_fd_ = -1;
-        }
-
         if (stop_event_fd_ >= 0) {
             close(stop_event_fd_);
             stop_event_fd_ = -1;
+        }
+
+        if (listener_fd_ >= 0) {
+            close(listener_fd_);
+            listener_fd_ = -1;
         }
 
         std::cerr << "TCP listener stopped" << std::endl;

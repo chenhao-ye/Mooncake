@@ -19,12 +19,40 @@
 // Forward declaration
 class FlexTransferEngine;
 
+/**
+ * For remote CopyServer to update the progress counter to indicate how many
+ * requests have been transferred.
+ */
 struct CopyCtrlBlock {
     volatile std::atomic_int64_t progress_counter = 0;
     uint64_t padding[7];
 };
 
 static_assert(sizeof(CopyCtrlBlock) == 64, "CopyCtrlBlock must be 64-byte");
+
+/**
+ * Mark the target transfer mode for registration.
+ * Note these are flag enum where `Direct | Copy` is acceptable.
+ */
+enum class TransferMode : uint8_t {
+    // let the transfer engine decide: enable_copy_ ? Copy : Direct
+    Auto = 0,
+    // directly register with RDMA NICs, which enable zero-copy direct transfer
+    Direct = 1 << 0,
+    // record in copiable_regions that can serve via copy-based transfer
+    Copy = 1 << 1,  // via either RDMA write or TCP
+};
+
+inline TransferMode operator|(TransferMode a, TransferMode b) {
+    return static_cast<TransferMode>(
+        static_cast<std::underlying_type_t<TransferMode>>(a) |
+        static_cast<std::underlying_type_t<TransferMode>>(b));
+}
+
+inline bool operator&(TransferMode a, TransferMode b) {
+    return static_cast<std::underlying_type_t<TransferMode>>(a) &
+           static_cast<std::underlying_type_t<TransferMode>>(b);
+}
 
 /**
  * FlexTransferEngine is a flexible wrapper on top of TransferEngine that
@@ -57,59 +85,32 @@ class FlexTransferEngine {
 
     ~FlexTransferEngine();
 
-    /**
-     * Register local memory with the transfer engine.
-     * @param force_direct If true, forces RDMA registration even when
-     * enable_copy_ is true
-     */
     int registerLocalMemory(uintptr_t addr, size_t length,
                             const std::string &location, bool remote_accessible,
-                            bool remote_atomic, bool force_direct = false);
+                            bool remote_atomic,
+                            TransferMode mode = TransferMode::Auto);
 
-    /**
-     * Unregister local memory.
-     * @param force_direct If true, forces RDMA unregistration even when
-     * enable_copy_ is true
-     */
-    int unregisterLocalMemory(uintptr_t addr, bool force_direct = false);
+    int unregisterLocalMemory(uintptr_t addr,
+                              TransferMode mode = TransferMode::Auto);
 
-    /**
-     * Register a batch of local memory buffers.
-     * @param force_direct If true, forces RDMA registration even when
-     * enable_copy_ is true
-     */
     int registerLocalMemoryBatch(std::vector<buffer_entry_t> &buffer_list,
                                  const std::string &location,
-                                 bool force_direct = false);
+                                 TransferMode mode = TransferMode::Auto);
 
     int registerLocalMemoryBatch(MemoryBatch &memory_batch,
-                                 bool force_direct = false) {
+                                 TransferMode mode = TransferMode::Auto) {
         for (auto &[location, buffers] : memory_batch.location_buffers_map) {
-            int rc = registerLocalMemoryBatch(buffers, location, force_direct);
+            int rc = registerLocalMemoryBatch(buffers, location, mode);
             if (rc) return rc;
         }
         return 0;
     }
 
-    /**
-     * Unregister a batch of local memory buffers.
-     * @param force_direct If true, forces RDMA unregistration even when
-     * enable_copy_ is true
-     */
     int unregisterLocalMemoryBatch(std::vector<uintptr_t> &addr_list,
-                                   bool force_direct = false);
+                                   TransferMode mode = TransferMode::Auto);
 
-    /**
-     * Sync segment cache with metadata server.
-     */
     int syncSegmentCache() { return ::syncSegmentCache(engine_); }
 
-    /**
-     * Get the copy server URL for this FlexTransferEngine instance.
-     * Returns the URL in format "ip_addr:port" that can be used by other
-     * instances to submit copy-based transfer requests.
-     * Returns empty string if enable_copy_ is false.
-     */
     const std::string &getCopyServerUrl() const {
         return copy_server_.getServerUrl();
     }
@@ -119,9 +120,6 @@ class FlexTransferEngine {
 
     CopyClient &getCopyClient() { return copy_client_; }
 
-    // for CopyClient
-    const std::string &getLocalServerName() const { return local_server_name_; }
-
     segment_id_t getSegmentId(const std::string &segment_name);
 
     CopyCtrlBlock *acquireCopyCtrlBlock();
@@ -129,7 +127,6 @@ class FlexTransferEngine {
     void releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block);
 
    private:
-    std::string local_server_name_;
     const bool enable_copy_;  // Whether to enable copy-based transfer
     const std::string ctrl_block_location_;
 

@@ -28,11 +28,10 @@ FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
                                        const std::string &local_server_name,
                                        bool enable_copy,
                                        const std::string &ctrl_block_location)
-    : local_server_name_(local_server_name),
-      enable_copy_(enable_copy),
+    : enable_copy_(enable_copy),
       ctrl_block_location_(ctrl_block_location),
       copy_server_(*this),
-      copy_client_(*this) {
+      copy_client_(*this, local_server_name) {
     if (ctrl_block_location.find("cuda:") == 0) {
         throw std::invalid_argument(
             "ctrl_block_location must not be on CUDA: " + ctrl_block_location);
@@ -76,48 +75,96 @@ int FlexTransferEngine::registerLocalMemory(uintptr_t addr, size_t length,
                                             const std::string &location,
                                             bool remote_accessible,
                                             bool remote_atomic,
-                                            bool force_direct) {
+                                            TransferMode mode) {
+    if (mode == TransferMode::Auto)
+        mode = enable_copy_ ? TransferMode::Copy : TransferMode::Direct;
     // do actual RDMA registration
-    if (force_direct || !enable_copy_) {
-        return ::registerLocalMemory(engine_, reinterpret_cast<void *>(addr),
-                                     length, location.c_str(),
-                                     remote_accessible, remote_atomic);
-    } else {  // register for copy-based transfer
-        return copy_server_.registerLocalMemory(reinterpret_cast<void *>(addr),
-                                                length, location);
+    int rc = 0;
+    if (mode & TransferMode::Direct) {
+        rc = ::registerLocalMemory(engine_, reinterpret_cast<void *>(addr),
+                                   length, location.c_str(), remote_accessible,
+                                   remote_atomic);
+        if (rc) return rc;
     }
+    if (mode & TransferMode::Copy) {
+        rc = copy_server_.registerLocalMemory(reinterpret_cast<void *>(addr),
+                                              length, location);
+        if (rc) return rc;
+    }
+    return 0;
 }
 
 int FlexTransferEngine::unregisterLocalMemory(uintptr_t addr,
-                                              bool force_direct) {
-    if (force_direct || !enable_copy_) {
-        return ::unregisterLocalMemory(engine_, reinterpret_cast<void *>(addr));
-    } else {
-        return copy_server_.unregisterLocalMemory(
-            reinterpret_cast<void *>(addr));
+                                              TransferMode mode) {
+    if (mode == TransferMode::Auto)
+        mode = enable_copy_ ? TransferMode::Copy : TransferMode::Direct;
+
+    // Note if an address is registered multiple times, direct mode will expect
+    // the exact number of unregister but the copy mode only expect one.
+    // If multiple unregister are called, they will still be safely done, except
+    // the copy mode will return -1 for unregister other than the first one.
+    // That's also why we keep copy mode unregister after the diect mode, so
+    // that the return code from copy mode won't affect direct mode when both
+    // modes are enabled.
+
+    int rc = 0;
+    if (mode & TransferMode::Direct) {
+        rc = ::unregisterLocalMemory(engine_, reinterpret_cast<void *>(addr));
+        if (rc) return rc;
     }
+    // Note if there are duplicated address, copy_server_.unregisterLocalMemory
+    // can return an error
+    if (mode & TransferMode::Copy) {
+        rc = copy_server_.unregisterLocalMemory(reinterpret_cast<void *>(addr));
+        if (rc) return rc;
+    }
+    return 0;
 }
 
 int FlexTransferEngine::registerLocalMemoryBatch(
     std::vector<buffer_entry_t> &buffer_list, const std::string &location,
-    bool force_direct) {
-    if (force_direct || !enable_copy_) {
-        return ::registerLocalMemoryBatch(engine_, buffer_list.data(),
-                                          buffer_list.size(), location.c_str());
-    } else {
-        return copy_server_.registerLocalMemoryBatch(buffer_list, location);
+    TransferMode mode) {
+    if (mode == TransferMode::Auto)
+        mode = enable_copy_ ? TransferMode::Copy : TransferMode::Direct;
+
+    int rc = 0;
+    if (mode & TransferMode::Direct) {
+        rc = ::registerLocalMemoryBatch(engine_, buffer_list.data(),
+                                        buffer_list.size(), location.c_str());
+        if (rc) return rc;
     }
+    if (mode & TransferMode::Copy) {
+        rc = copy_server_.registerLocalMemoryBatch(buffer_list, location);
+        if (rc) return rc;
+    }
+    return 0;
 }
 
 int FlexTransferEngine::unregisterLocalMemoryBatch(
-    std::vector<uintptr_t> &addr_list, bool force_direct) {
-    if (force_direct || !enable_copy_) {
-        return ::unregisterLocalMemoryBatch(
+    std::vector<uintptr_t> &addr_list, TransferMode mode) {
+    if (mode == TransferMode::Auto)
+        mode = enable_copy_ ? TransferMode::Copy : TransferMode::Direct;
+
+    // Note if an address is registered multiple times, direct mode will expect
+    // the exact number of unregister but the copy mode only expect one.
+    // If multiple unregister are called, they will still be safely done, except
+    // the copy mode will return -1 for unregister other than the first one.
+    // That's also why we keep copy mode unregister after the diect mode, so
+    // that the return code from copy mode won't affect direct mode when both
+    // modes are enabled.
+
+    int rc = 0;
+    if (mode & TransferMode::Direct) {
+        rc = ::unregisterLocalMemoryBatch(
             engine_, reinterpret_cast<void **>(addr_list.data()),
             addr_list.size());
-    } else {
-        return copy_server_.unregisterLocalMemoryBatch(addr_list);
+        if (rc) return rc;
     }
+    if (mode & TransferMode::Copy) {
+        rc = copy_server_.unregisterLocalMemoryBatch(addr_list);
+        if (rc) return rc;
+    }
+    return rc;
 }
 
 segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {

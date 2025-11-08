@@ -47,7 +47,8 @@ struct ClientConnection {
  */
 class CopyClient {
    public:
-    CopyClient(FlexTransferEngine &engine) : engine_(engine) {}
+    CopyClient(FlexTransferEngine &engine, const std::string local_segment_name)
+        : engine_(engine), local_segment_name_(local_segment_name) {}
     ~CopyClient();
 
     ClientConnection *allocConnection(const std::string &server_url);
@@ -75,6 +76,9 @@ class CopyClient {
     int connectToCopyServer(const std::string &server_url);
 
     FlexTransferEngine &engine_;
+
+    // Let the remote CopyServer know where to submit RDMA write
+    const std::string local_segment_name_;
 
     // Cached TCP connections to remote CopyServers (server_url -> connection)
     std::unordered_map<std::string, ClientConnection *> connection_cache_;

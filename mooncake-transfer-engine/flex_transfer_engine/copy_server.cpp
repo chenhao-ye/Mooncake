@@ -9,7 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -312,10 +312,13 @@ int CopyServer::processRequest(int client_fd) {
 
     std::string segment_name;
     uint64_t target_progress_addr = 0;
-
     segment_id_t target_segment_id;
 
-    int rc;
+    batch_id_t prorgess_batch_id = INVALID_BATCH;
+    uint64_t last_updated_progress = 0;
+
+    int rc, status;
+
     rc = readSegmentName(client_fd, segment_name);
     if (rc) goto cleanup;
 
@@ -342,7 +345,7 @@ int CopyServer::processRequest(int client_fd) {
         }
 
         for (auto &task : tasks) {
-            int rc = waitTask(task);
+            rc = waitTask(task);
             if (rc) {
                 std::cerr << "Failed to wait for task completion" << std::endl;
                 goto cleanup;
@@ -358,29 +361,20 @@ int CopyServer::processRequest(int client_fd) {
      no more update to the progress counter.
      */
 
-    {  // Update progress to indicate completion via RDMA
-        copy_ctrl_block->progress_counter.store(num_completed,
-                                                std::memory_order_release);
-        batch_id_t batch_id = ::allocateBatchID(engine_.getEngine(), 1);
-        transfer_request_t progress_req = {
-            .opcode = OPCODE_WRITE,
-            .source = (void *)&(copy_ctrl_block->progress_counter),
-            .target_id = target_segment_id,
-            .target_offset = reinterpret_cast<uint64_t>(target_progress_addr),
-            .length = sizeof(int64_t),
-        };
-        ::submitTransfer(engine_.getEngine(), batch_id, &progress_req, 1);
-
-        // Wait for completion
-        transfer_status_t status{STATUS_FAILED, 0};
-        while (::getTransferStatus(engine_.getEngine(), batch_id, 0, &status) ==
-                   0 &&
-               status.status == STATUS_WAITING) {
-            // usleep(1);
-        }
-        ::freeBatchID(engine_.getEngine(), batch_id);
-        success = status.status == STATUS_COMPLETED;
+    rc = tryUpdateRemoteProgress(prorgess_batch_id, last_updated_progress,
+                                 num_completed, copy_ctrl_block,
+                                 target_segment_id, target_progress_addr);
+    if (rc) {
+        std::cerr << "Fail to update the progress" << std::endl;
+        goto cleanup;
     }
+    status = waitBatch(prorgess_batch_id);
+    if (status != STATUS_COMPLETED) {
+        std::cerr << "Error wait for progress update completion" << std::endl;
+        goto cleanup;
+    }
+
+    success = true;
 
     std::cerr << "Completed transfer request: " << num_completed << " tasks"
               << std::endl;
@@ -481,6 +475,7 @@ int CopyServer::readTasks(int client_fd, uint64_t &target_progress_addr,
 
 int CopyServer::executeTask(std::vector<Task> tasks, size_t task_idx,
                             int target_segment_id) {
+    int rc;
     Task &task = tasks[task_idx];
     // delayed source address validation:
     // if source_addr is invalid, will be detected here
@@ -497,9 +492,9 @@ int CopyServer::executeTask(std::vector<Task> tasks, size_t task_idx,
 
     int buffer_idx = buffer_pair.selectNextBuffer();
     int buffer_used_by_task_idx = buffer_pair.users[buffer_idx];
-    if (buffer_used_by_task_idx >= 0) {
-        int rc = waitTask(tasks[buffer_used_by_task_idx]);
-        if (rc) {  // a previous write failed
+    if (buffer_used_by_task_idx >= 0) {  // wait for a previous task to complete
+        rc = waitTask(tasks[buffer_used_by_task_idx]);
+        if (rc) {
             std::cerr << "Failed to wait for previous task on buffer "
                       << buffer_idx << std::endl;
             return rc;
@@ -509,8 +504,7 @@ int CopyServer::executeTask(std::vector<Task> tasks, size_t task_idx,
     void *buffer = buffer_pair.buffers[buffer_idx];
 
     // Copy data from source to buffer
-    int rc =
-        copyMemory(buffer, task.source_addr, task.length, buffer_pair.is_cuda);
+    rc = copyMemory(buffer, task.source_addr, task.length, buffer_pair.is_cuda);
     if (rc) {
         std::cerr << "Failed to copy memory from " << task.source_addr
                   << " to buffer " << buffer << std::endl;
@@ -518,8 +512,7 @@ int CopyServer::executeTask(std::vector<Task> tasks, size_t task_idx,
     }
 
     // Submit RDMA write from buffer to remote target
-    batch_id_t batch_id = ::allocateBatchID(engine_.getEngine(), 1);
-    transfer_request_t write_req = {
+    transfer_request_t req = {
         .opcode = OPCODE_WRITE,
         .source = buffer,
         .target_id = target_segment_id,
@@ -527,12 +520,11 @@ int CopyServer::executeTask(std::vector<Task> tasks, size_t task_idx,
         .length = task.length,
     };
 
-    int submit_rc =
-        ::submitTransfer(engine_.getEngine(), batch_id, &write_req, 1);
-    if (submit_rc < 0) {
+    batch_id_t batch_id;
+    rc = submitBatch(batch_id, req);
+    if (rc) {
         std::cerr << "Failed to submit RDMA write" << std::endl;
-        ::freeBatchID(engine_.getEngine(), batch_id);
-        return submit_rc;
+        return rc;
     }
 
     task.batch_id = batch_id;
@@ -634,22 +626,49 @@ void CopyServer::freeBufferPair(BufferPair *pair) {
 int CopyServer::waitTask(Task &task) {
     if (task.batch_id == INVALID_BATCH) return 0;
 
-    [[maybe_unused]] int rc;
-    transfer_status_t status;
+    int status = waitBatch(task.batch_id);
+    task.buffer_pair->users[task.buffer_idx] = -1;  // mark buffer free
+    task.buffer_pair = nullptr;
+    task.buffer_idx = -1;
+    return status == STATUS_COMPLETED ? 0 : -1;
+}
 
-    while (true) {
-        rc =
-            ::getTransferStatus(engine_.getEngine(), task.batch_id, 0, &status);
-        assert(rc == 0);
-        if (status.status != STATUS_WAITING) {  // completed or error
-            task.buffer_pair->users[task.buffer_idx] = -1;  // mark buffer free
-            ::freeBatchID(engine_.getEngine(), task.batch_id);
-            task.batch_id = INVALID_BATCH;
-            task.buffer_pair = nullptr;
-            task.buffer_idx = -1;
-            return status.status == STATUS_COMPLETED ? 0 : -1;
-        }
+// Poll if the given prorgess_batch_id has finished; if so, submit another
+// progress update via atomic fetch-add, which will update prorgess_batch_id
+// and last_updated_progress
+int CopyServer::tryUpdateRemoteProgress(batch_id_t &prorgess_batch_id,
+                                        uint64_t &last_updated_progress,
+                                        int32_t num_completed,
+                                        CopyCtrlBlock *copy_ctrl_block,
+                                        segment_id_t target_segment_id,
+                                        uint64_t target_progress_addr) {
+    int status, rc;
+    if (prorgess_batch_id != INVALID_BATCH) {  // check the last progress update
+        status = pollBatch(prorgess_batch_id);
+        if (status == STATUS_WAITING) return 0;  // not done
+        // done: completed or error
+        freeBatch(prorgess_batch_id);
+        if (status != STATUS_COMPLETED) return -1;
     }
+
+    // no new update
+    if (static_cast<uint64_t>(num_completed) == last_updated_progress) return 0;
+
+    // submit another batch for progress update
+    transfer_request_t progress_req = {
+        .opcode = OPCODE_ATOMIC_FETCH_ADD,
+        .source = (void *)&(copy_ctrl_block->progress_counter),
+        .target_id = target_segment_id,
+        .target_offset = target_progress_addr,
+        // for atomic fetch-add, .length is overloaded as the operand value
+        .length = static_cast<uint64_t>(num_completed) - last_updated_progress,
+    };
+
+    rc = submitBatch(prorgess_batch_id, progress_req);
+    if (rc) return rc;
+
+    last_updated_progress = num_completed;
+    return 0;
 }
 
 int CopyServer::copyMemory(void *dst, const void *src, size_t size,
@@ -670,4 +689,40 @@ int CopyServer::copyMemory(void *dst, const void *src, size_t size,
         memcpy(dst, src, size);
     }
     return 0;
+}
+
+int CopyServer::submitBatch(batch_id_t &batch_id, transfer_request_t &req) {
+    batch_id = ::allocateBatchID(engine_.getEngine(), 1);
+    int rc = ::submitTransfer(engine_.getEngine(), batch_id, &req, 1);
+    if (rc) freeBatch(batch_id);  // failed; reset
+    return rc;
+}
+
+void CopyServer::freeBatch(batch_id_t &batch_id) {
+    assert(batch_id != INVALID_BATCH);
+    ::freeBatchID(engine_.getEngine(), batch_id);
+    batch_id = INVALID_BATCH;
+}
+
+int CopyServer::pollBatch(batch_id_t batch_id) {
+    assert(batch_id != INVALID_BATCH);
+    [[maybe_unused]] int rc;
+    transfer_status_t status;
+    rc = ::getTransferStatus(engine_.getEngine(), batch_id, 0, &status);
+    assert(rc == 0);
+    return status.status;
+}
+
+// Wait until the given batch (size=1) is done and then free the batch; will
+// update batch_id to INVALID_BATCH; return the status
+int CopyServer::waitBatch(batch_id_t &batch_id) {
+    assert(batch_id != INVALID_BATCH);
+
+    int status;
+    do {
+        status = pollBatch(batch_id);
+    } while (status == STATUS_WAITING);
+
+    freeBatch(batch_id);
+    return status;
 }

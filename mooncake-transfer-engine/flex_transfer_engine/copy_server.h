@@ -140,8 +140,6 @@ class CopyServer {
     // Require regions_mutex_ to be held before calling
     void freeBufferPair(BufferPair *pair);
 
-    int waitTask(Task &task);
-
     int copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
 
     void workerThread();
@@ -159,4 +157,33 @@ class CopyServer {
     // execute the task specified by task_idx
     int executeTask(std::vector<Task> tasks, size_t task_idx,
                     int target_segment_id);
+
+    // Wait until the given task is done
+    int waitTask(Task &task);
+
+    // Poll if the given prorgess_batch_id has finished; if so, submit another
+    // progress update via atomic fetch-add, which will update prorgess_batch_id
+    // and last_updated_progress
+    int tryUpdateRemoteProgress(batch_id_t &prorgess_batch_id,
+                                uint64_t &last_updated_progress,
+                                int32_t num_completed,
+                                CopyCtrlBlock *copy_ctrl_block,
+                                segment_id_t target_segment_id,
+                                uint64_t target_progress_addr);
+
+    // Some handy helper functions for a size=1 batch
+
+    // Submit a size=1 batch with the given request; will updates batch_id; if
+    // fail, will free the batch and reset batch_id to INVALID_BATCH
+    int submitBatch(batch_id_t &batch_id, transfer_request_t &req);
+
+    // Free the batch and reset batch_id to INVALID_BATCH
+    void freeBatch(batch_id_t &batch_id);
+
+    // Poll size=1 batch and return status
+    int pollBatch(batch_id_t batch_id);
+
+    // Wait until the given batch (size=1) is done and then free the batch; will
+    // update batch_id to INVALID_BATCH; return the status
+    int waitBatch(batch_id_t &batch_id);
 };

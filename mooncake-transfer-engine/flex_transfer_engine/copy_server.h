@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "transfer_engine_c.h"
@@ -111,7 +112,7 @@ class CopyServer {
 
     // Active client connections
     // Server is single-threaded, no mutex needed
-    std::deque<int> active_client_fds_;
+    std::unordered_set<int> active_client_fds_;
 
     std::thread worker_thread_;
     std::atomic<bool> worker_running_;

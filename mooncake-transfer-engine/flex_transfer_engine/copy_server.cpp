@@ -264,13 +264,14 @@ void CopyServer::workerThread() {
                     struct epoll_event ev;
                     ev.events = EPOLLIN;
                     ev.data.fd = client_fd;
-                    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev) <
-                        0) {
+                    int rc =
+                        epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev);
+                    if (rc < 0) {
                         std::cerr << "Failed to add client to epoll: "
                                   << strerror(errno) << std::endl;
                         close(client_fd);
                     } else {
-                        active_client_fds_.push_back(client_fd);
+                        active_client_fds_.insert(client_fd);
                     }
                 }
                 continue;
@@ -283,14 +284,9 @@ void CopyServer::workerThread() {
                 std::cerr << "Closing client connection fd=" << ready_fd
                           << std::endl;
 
-                // Remove from epoll
                 epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, ready_fd, nullptr);
                 close(ready_fd);
-
-                // Remove from active_client_fds_
-                auto it = std::find(active_client_fds_.begin(),
-                                    active_client_fds_.end(), ready_fd);
-                active_client_fds_.erase(it);
+                active_client_fds_.erase(ready_fd);
             }
         }
     }

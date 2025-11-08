@@ -11,6 +11,7 @@
 #include <cstring>
 #include <iostream>
 
+#include "copy_transfer.h"
 #include "flex_transfer_engine.h"
 #include "util.h"
 

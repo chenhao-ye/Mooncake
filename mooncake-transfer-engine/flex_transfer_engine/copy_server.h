@@ -9,10 +9,10 @@
 #include <unordered_set>
 #include <vector>
 
+#include "copy_transfer.h"
 #include "transfer_engine_c.h"
 
 // Forward declarations
-struct CopyCtrlBlock;
 class FlexTransferEngine;
 
 class CopyServer {
@@ -70,7 +70,7 @@ class CopyServer {
         // select the next buffer to use
         // return the one with a lower-index task (likely to finish earlier OR
         // is free for users[i]<0)
-        int selectNextBuffer() { return users[0] < users[1] ? 0 : 1; }
+        int selectNextBuffer() { return users[0] <= users[1] ? 0 : 1; }
     };
 
     struct Task {

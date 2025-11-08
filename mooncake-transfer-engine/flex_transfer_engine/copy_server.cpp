@@ -17,6 +17,7 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "copy_transfer.h"
 #include "flex_transfer_engine.h"
 #include "transfer_engine_c.h"
 #include "util.h"

@@ -9,10 +9,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "copy_transfer.h"
 #include "transfer_engine_c.h"
 
 // Forward declarations
-struct CopyCtrlBlock;
 class FlexTransferEngine;
 
 struct ClientConnection {

@@ -47,7 +47,8 @@ void FlexBatch::addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
                            .length = size});
 }
 
-int FlexBatch::submit(const std::string &target, bool is_target_copy) {
+int FlexBatch::submit(const std::string &target, bool is_target_copy,
+                      bool use_rdma) {
     if (entries_.empty()) return 0;
 
     if (!is_target_copy) {  // target is a segment name for direct RDMA
@@ -63,11 +64,15 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy) {
                                 entries_.data(), entries_.size());
     }
     // else: copy-based transfer
-    copy_ctrl_block_ = engine_->acquireCopyCtrlBlock();
     auto &copy_client = engine_->getCopyClient();
     client_conn_ = copy_client.allocConnection(target);
-    copy_client.submitTransferToCopyServer(entries_, client_conn_,
-                                           copy_ctrl_block_);
+    if (use_rdma) {
+        copy_ctrl_block_ = engine_->acquireCopyCtrlBlock();
+        copy_client.submitTransferToCopyServer(entries_, client_conn_,
+                                               copy_ctrl_block_);
+    } else {
+        // TODO: add TCP support
+    }
     return 0;
 }
 
@@ -122,7 +127,7 @@ int FlexBatch::getTransferStatus(size_t task_id) {
 
     // something went wrong so that we need to close this connection, e.g.,
     // - the server has closed the connection (nbytes=0) OR
-    // - the server crashed (nbytes<0 with unexpected errno) OR 
+    // - the server crashed (nbytes<0 with unexpected errno) OR
     // - the finalized value is not an expected value
     client_conn_->free();
     delete client_conn_;

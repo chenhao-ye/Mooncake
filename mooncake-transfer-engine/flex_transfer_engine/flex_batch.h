@@ -42,8 +42,11 @@ class FlexBatch {
      * URL (formatted as "ip:port").
      * @param is_target_copy If true, target is a copy server URL; if false,
      * target is a segment name.
+     * @param use_rdma If true, use RDMA; if false, use TCP. Only valid if
+     * is_target_copy is true (direct mode must use RDMA).
      */
-    int submit(const std::string &target, bool is_target_copy = false);
+    int submit(const std::string &target, bool is_target_copy = false,
+               bool use_rdma = true);
 
     /**
      * Get the status of a transfer task.

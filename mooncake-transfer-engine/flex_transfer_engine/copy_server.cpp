@@ -191,8 +191,10 @@ void CopyServer::stopListener() {
 
         // Signal the eventfd to wake up the worker thread
         if (stop_event_fd_ >= 0) {
+            [[maybe_unused]] ssize_t nbytes;
             uint64_t event_value = 1;
-            write(stop_event_fd_, &event_value, sizeof(event_value));
+            nbytes = write(stop_event_fd_, &event_value, sizeof(event_value));
+            assert(nbytes == sizeof(event_value));
         }
 
         if (worker_thread_.joinable()) worker_thread_.join();
@@ -241,8 +243,11 @@ void CopyServer::workerThread() {
 
             // Check if we were signaled to stop
             if (ready_fd == stop_event_fd_) {
+                [[maybe_unused]] ssize_t nbytes;
                 uint64_t event_value;
-                read(stop_event_fd_, &event_value, sizeof(event_value));
+                nbytes =
+                    read(stop_event_fd_, &event_value, sizeof(event_value));
+                assert(nbytes == sizeof(event_value));
                 goto cleanup;  // Exit the worker thread loop
             }
 

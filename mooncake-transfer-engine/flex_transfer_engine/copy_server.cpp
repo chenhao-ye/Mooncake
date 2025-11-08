@@ -284,7 +284,7 @@ void CopyServer::workerThread() {
             }
 
             // Handle client data
-            int rc = processRequest(ready_fd);
+            int rc = processRDMARequest(ready_fd);
             if (rc != 0) {
                 // Error occurred or client disconnected, close and remove
                 std::cerr << "Closing client connection fd=" << ready_fd
@@ -306,7 +306,7 @@ cleanup:
     std::cerr << "Worker thread stopped" << std::endl;
 }
 
-int CopyServer::processRequest(int client_fd) {
+int CopyServer::processRDMARequest(int client_fd) {
     bool success = false;
 
     // num_done is a lower bound watermark: if task_idx < num_done, it is done

@@ -103,7 +103,6 @@ class CopyServer {
     std::unordered_map<void *, MemoryRegion> copiable_regions_;
 
     // Buffer pool per location (LocIdx -> buffer pair)
-    // Only used when enable_copy is true
     std::vector<BufferPair *> buffer_pool_;
 
     // Location string storage (LocIdx -> location string)
@@ -146,7 +145,7 @@ class CopyServer {
     void workerThread();
 
     // Returns 0 on success, -1 on error (connection should be closed)
-    int processRequest(int client_fd);
+    int processRDMARequest(int client_fd);
 
     // read segment name from fd and write into segment_name
     int readSegmentName(int client_fd, std::string &segment_name);
@@ -167,8 +166,7 @@ class CopyServer {
     // and last_updated_progress
     int tryUpdateRemoteProgress(batch_id_t &prorgess_batch_id,
                                 int32_t &last_updated_num_done,
-                                int32_t num_done,
-                                RDMACopyCtrlBlock *ctrl_block,
+                                int32_t num_done, RDMACopyCtrlBlock *ctrl_block,
                                 segment_id_t target_segment_id,
                                 uint64_t target_progress_addr);
 

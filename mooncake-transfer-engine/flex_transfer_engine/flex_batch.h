@@ -7,14 +7,14 @@
 
 #include "transfer_engine_c.h"
 
-struct CopyCtrlBlock;
+struct RDMACopyCtrlBlock;
 struct ClientConnection;
 class FlexTransferEngine;
 
 /**
  * FlexBatch represents a batch transfer operation.
  * It manages the batch lifecycle including freeing the batch ID and
- * returning the CopyCtrlBlock to the engine cache on destruction.
+ * returning the RDMACopyCtrlBlock to the engine cache on destruction.
  */
 class FlexBatch {
    public:
@@ -25,7 +25,7 @@ class FlexBatch {
     explicit FlexBatch(std::shared_ptr<FlexTransferEngine> engine)
         : engine_(std::move(engine)),
           batch_id_(INVALID_BATCH),
-          copy_ctrl_block_(nullptr),
+          ctrl_block_(nullptr),
           client_conn_(nullptr) {}
 
     ~FlexBatch() { free(); }
@@ -66,7 +66,7 @@ class FlexBatch {
     batch_id_t batch_id_;
 
     // for copy transfer
-    CopyCtrlBlock *copy_ctrl_block_;
+    RDMACopyCtrlBlock *ctrl_block_;
     // once see a progress that implies fully finished OR received a int32_t
     // from the socket, it means this batch is done with the connection; then
     // set client_conn_ to nullptr

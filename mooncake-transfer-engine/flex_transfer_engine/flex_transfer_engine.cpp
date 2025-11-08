@@ -61,11 +61,11 @@ FlexTransferEngine::~FlexTransferEngine() {
 
     {
         std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
-        for (CopyCtrlBlock *ctrl_block : copy_ctrl_block_cache_) {
+        for (RDMACopyCtrlBlock *ctrl_block : ctrl_block_cache_) {
             ::unregisterLocalMemory(engine_, ctrl_block);
             delete ctrl_block;
         }
-        // copy_ctrl_block_cache_.clear();
+        // ctrl_block_cache_.clear();
     }
 
     ::destroyTransferEngine(engine_);
@@ -186,25 +186,26 @@ segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {
     return segment_id;
 }
 
-CopyCtrlBlock *FlexTransferEngine::acquireCopyCtrlBlock() {
+RDMACopyCtrlBlock *FlexTransferEngine::allocRDMACopyCtrlBlock() {
     std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
 
     // Try to get from cache first
-    if (!copy_ctrl_block_cache_.empty()) {
-        CopyCtrlBlock *ctrl_block = copy_ctrl_block_cache_.back();
-        copy_ctrl_block_cache_.pop_back();
+    if (!ctrl_block_cache_.empty()) {
+        RDMACopyCtrlBlock *ctrl_block = ctrl_block_cache_.back();
+        ctrl_block_cache_.pop_back();
         ctrl_block->progress_counter.store(0, std::memory_order_release);
         return ctrl_block;
     }
 
     // Cache is empty, allocate a new one
-    CopyCtrlBlock *ctrl_block = new CopyCtrlBlock();
+    RDMACopyCtrlBlock *ctrl_block = new RDMACopyCtrlBlock();
 
     // Register it with RDMA using the specified location
-    int rc = ::registerLocalMemory(engine_, ctrl_block, sizeof(CopyCtrlBlock),
-                                   ctrl_block_location_.c_str(),
-                                   /*remote_accessible*/ true,
-                                   /*remote_atomic*/ true);
+    int rc =
+        ::registerLocalMemory(engine_, ctrl_block, sizeof(RDMACopyCtrlBlock),
+                              ctrl_block_location_.c_str(),
+                              /*remote_accessible*/ true,
+                              /*remote_atomic*/ true);
     if (rc) {
         delete ctrl_block;
         return nullptr;
@@ -212,8 +213,8 @@ CopyCtrlBlock *FlexTransferEngine::acquireCopyCtrlBlock() {
     return ctrl_block;
 }
 
-void FlexTransferEngine::releaseCopyCtrlBlock(CopyCtrlBlock *ctrl_block) {
+void FlexTransferEngine::freeRDMACopyCtrlBlock(RDMACopyCtrlBlock *ctrl_block) {
     if (!ctrl_block) return;
     std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
-    copy_ctrl_block_cache_.emplace_back(ctrl_block);
+    ctrl_block_cache_.emplace_back(ctrl_block);
 }

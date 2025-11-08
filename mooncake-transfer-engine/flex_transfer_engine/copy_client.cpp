@@ -49,9 +49,9 @@ void CopyClient::freeConnection(ClientConnection *conn) {
     delete conn;
 }
 
-void CopyClient::submitTransferToCopyServer(
-    std::vector<transfer_request_t> &entries, ClientConnection *conn,
-    CopyCtrlBlock *ctrl_block) {
+void CopyClient::submitRDMATransfer(std::vector<transfer_request_t> &entries,
+                                    ClientConnection *conn,
+                                    RDMACopyCtrlBlock *ctrl_block) {
     assert(ctrl_block);
 
     // Send protocol to remote CopyServer:

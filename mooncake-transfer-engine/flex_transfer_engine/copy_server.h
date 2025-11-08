@@ -168,7 +168,7 @@ class CopyServer {
     int tryUpdateRemoteProgress(batch_id_t &prorgess_batch_id,
                                 int32_t &last_updated_num_done,
                                 int32_t num_done,
-                                CopyCtrlBlock *copy_ctrl_block,
+                                RDMACopyCtrlBlock *ctrl_block,
                                 segment_id_t target_segment_id,
                                 uint64_t target_progress_addr);
 

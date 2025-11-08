@@ -63,9 +63,9 @@ class CopyClient {
      * @param ctrl_block Control block for progress tracking
      * @return connection pointer
      */
-    void submitTransferToCopyServer(std::vector<transfer_request_t> &entries,
-                                    ClientConnection *conn,
-                                    CopyCtrlBlock *ctrl_block);
+    void submitRDMATransfer(std::vector<transfer_request_t> &entries,
+                            ClientConnection *conn,
+                            RDMACopyCtrlBlock *ctrl_block);
 
    private:
     /**

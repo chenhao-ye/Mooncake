@@ -18,9 +18,9 @@ void FlexBatch::free() {
         ::freeBatchID(engine_->getEngine(), batch_id_);
         batch_id_ = INVALID_BATCH;
     }
-    if (copy_ctrl_block_) {
-        engine_->releaseCopyCtrlBlock(copy_ctrl_block_);
-        copy_ctrl_block_ = nullptr;
+    if (ctrl_block_) {
+        engine_->freeRDMACopyCtrlBlock(ctrl_block_);
+        ctrl_block_ = nullptr;
     }
     if (client_conn_) {
         engine_->getCopyClient().freeConnection(client_conn_);
@@ -67,9 +67,8 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy,
     auto &copy_client = engine_->getCopyClient();
     client_conn_ = copy_client.allocConnection(target);
     if (use_rdma) {
-        copy_ctrl_block_ = engine_->acquireCopyCtrlBlock();
-        copy_client.submitTransferToCopyServer(entries_, client_conn_,
-                                               copy_ctrl_block_);
+        ctrl_block_ = engine_->allocRDMACopyCtrlBlock();
+        copy_client.submitRDMATransfer(entries_, client_conn_, ctrl_block_);
     } else {
         // TODO: add TCP support
     }
@@ -77,7 +76,7 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy,
 }
 
 int FlexBatch::getTransferStatus(size_t task_id) {
-    if (!copy_ctrl_block_) {  // Direct RDMA transfer
+    if (!ctrl_block_) {  // Direct RDMA transfer
         transfer_status_t status;
         int rc = ::getTransferStatus(engine_->getEngine(), batch_id_, task_id,
                                      &status);
@@ -92,7 +91,7 @@ int FlexBatch::getTransferStatus(size_t task_id) {
     if (!client_conn_) return STATUS_FAILED;
 
     int64_t progress =
-        copy_ctrl_block_->progress_counter.load(std::memory_order_acquire);
+        ctrl_block_->progress_counter.load(std::memory_order_acquire);
     assert(progress >= last_progress_);
     if (progress > last_progress_) {
         last_progress_ = progress;
@@ -135,7 +134,7 @@ int FlexBatch::getTransferStatus(size_t task_id) {
 
     // make one last check, just in case it happend during recv()
     last_progress_ =
-        copy_ctrl_block_->progress_counter.load(std::memory_order_acquire);
+        ctrl_block_->progress_counter.load(std::memory_order_acquire);
 
 check_last:
     return static_cast<int64_t>(task_id) < last_progress_ ? STATUS_COMPLETED

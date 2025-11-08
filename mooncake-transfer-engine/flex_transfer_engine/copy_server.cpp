@@ -319,7 +319,7 @@ int CopyServer::processRequest(int client_fd) {
     constexpr int32_t update_freq = 5;  // for now: every 5 requests
 
     std::vector<Task> tasks;
-    CopyCtrlBlock *copy_ctrl_block = nullptr;
+    RDMACopyCtrlBlock *ctrl_block = nullptr;
 
     std::string segment_name;
     uint64_t target_progress_addr = 0;
@@ -341,9 +341,9 @@ int CopyServer::processRequest(int client_fd) {
         goto cleanup;
     }
 
-    copy_ctrl_block = engine_.acquireCopyCtrlBlock();
-    if (!copy_ctrl_block) {
-        std::cerr << "Failed to acquire CopyCtrlBlock" << std::endl;
+    ctrl_block = engine_.allocRDMACopyCtrlBlock();
+    if (!ctrl_block) {
+        std::cerr << "Failed to acquire RDMACopyCtrlBlock" << std::endl;
         goto cleanup;
     }
 
@@ -369,8 +369,7 @@ int CopyServer::processRequest(int client_fd) {
                 if ((num_done - last_updated_num_done) >= update_freq) {
                     rc = tryUpdateRemoteProgress(
                         prorgess_batch_id, last_updated_num_done, num_done,
-                        copy_ctrl_block, target_segment_id,
-                        target_progress_addr);
+                        ctrl_block, target_segment_id, target_progress_addr);
                     if (rc) {
                         std::cerr << "Fail to update the progress" << std::endl;
                         goto cleanup;
@@ -399,7 +398,7 @@ int CopyServer::processRequest(int client_fd) {
      progress counter.
      */
     rc = tryUpdateRemoteProgress(prorgess_batch_id, last_updated_num_done,
-                                 num_done, copy_ctrl_block, target_segment_id,
+                                 num_done, ctrl_block, target_segment_id,
                                  target_progress_addr);
     if (rc) {
         std::cerr << "Fail to update the progress" << std::endl;
@@ -427,7 +426,7 @@ cleanup:
             std::cerr << "Failed to wait for task completion" << std::endl;
     }
 
-    if (copy_ctrl_block) engine_.releaseCopyCtrlBlock(copy_ctrl_block);
+    if (ctrl_block) engine_.freeRDMACopyCtrlBlock(ctrl_block);
 
     // Send completion count via socket (i.e., num_done)
     // If this fails, the connection should be closed
@@ -675,7 +674,7 @@ int CopyServer::waitTask(Task &task) {
 int CopyServer::tryUpdateRemoteProgress(batch_id_t &prorgess_batch_id,
                                         int32_t &last_updated_num_done,
                                         int32_t num_done,
-                                        CopyCtrlBlock *copy_ctrl_block,
+                                        RDMACopyCtrlBlock *ctrl_block,
                                         segment_id_t target_segment_id,
                                         uint64_t target_progress_addr) {
     int status, rc;
@@ -693,7 +692,7 @@ int CopyServer::tryUpdateRemoteProgress(batch_id_t &prorgess_batch_id,
     // submit another batch for progress update
     transfer_request_t progress_req = {
         .opcode = OPCODE_ATOMIC_FETCH_ADD,
-        .source = (void *)&(copy_ctrl_block->progress_counter),
+        .source = (void *)&(ctrl_block->progress_counter),
         .target_id = target_segment_id,
         .target_offset = target_progress_addr,
         // for atomic fetch-add, .length is overloaded as the operand value

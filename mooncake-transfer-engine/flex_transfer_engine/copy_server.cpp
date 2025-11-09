@@ -205,12 +205,12 @@ void CopyServer::workerThread() {
     int flags = fcntl(listener_fd_, F_GETFL, 0);
     fcntl(listener_fd_, F_SETFL, flags | O_NONBLOCK);
 
-    const int MAX_EVENTS = 64;
-    struct epoll_event events[MAX_EVENTS];
+    constexpr int kMaxEvents = 64;
+    struct epoll_event events[kMaxEvents];
 
     while (worker_running_.load(std::memory_order_acquire)) {
         // Wait for events
-        int nfds = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
+        int nfds = epoll_wait(epoll_fd_, events, kMaxEvents, -1);
         if (nfds < 0) {
             if (errno == EINTR) continue;
             std::cerr << "epoll_wait error: " << strerror(errno) << std::endl;
@@ -376,7 +376,7 @@ int CopyServer::readSegmentName(int client_fd, std::string &segment_name) {
         return -1;
     }
 
-    const static size_t kMaxLength = 1ull << 20;
+    constexpr size_t kMaxLength = 1ull << 20;
     if (segment_name_len == 0 || segment_name_len > kMaxLength) {
         std::cerr << "Invalid segment name length: " << segment_name_len
                   << std::endl;

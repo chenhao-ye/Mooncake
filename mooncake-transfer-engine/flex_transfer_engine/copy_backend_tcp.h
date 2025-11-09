@@ -21,12 +21,12 @@ class TcpCopyBackend {
    private:
 #ifdef USE_CUDA
     // Fixed buffer size for chunked transfers (only needed for CUDA)
-    static constexpr size_t BUFFER_SIZE = 2 * 1024 * 1024;  // 2 MB
+    constexpr size_t kBufferSize = 2 * 1024 * 1024;  // 2 MB
 
     struct BufferPair {
         // buffers[0] and buffers[1] are separate pinned host memory buffers
         char *buffers[2];
-        size_t size;  // Size of each buffer (BUFFER_SIZE)
+        size_t size;  // Size of each buffer (kBufferSize)
 
         // Each buffer has its own CUDA stream
         cudaStream_t streams[2];

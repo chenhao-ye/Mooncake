@@ -85,7 +85,7 @@ void TcpCopyBackend::cleanup() {
 int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 #ifdef USE_CUDA
     // Initialize buffer pair on first use (only needed for CUDA)
-    if (!buffer_pair_) buffer_pair_ = new BufferPair(BUFFER_SIZE);
+    if (!buffer_pair_) buffer_pair_ = new BufferPair(kBufferSize);
 
 #endif
 
@@ -144,7 +144,7 @@ int TcpCopyBackend::processTask(int client_fd, Task &task) {
 
     // Process chunks
     while (remaining > 0) {
-        size_t chunk_size = std::min(remaining, BUFFER_SIZE);
+        size_t chunk_size = std::min(remaining, kBufferSize);
         cudaStream_t stream = buffer_pair_->streams[current_buffer];
         char *dst = buffer_pair_->buffers[current_buffer];
 

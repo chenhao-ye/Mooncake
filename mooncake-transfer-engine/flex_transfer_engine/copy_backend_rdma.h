@@ -11,7 +11,7 @@
 
 class FlexTransferEngine;
 
-class RDMACopyBackend {
+class RdmaCopyBackend {
    private:
     struct BufferPair {
         // buffers[0] is first half, buffers[1] is second half
@@ -56,9 +56,9 @@ class RDMACopyBackend {
     };
 
    public:
-    RDMACopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr)
+    RdmaCopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr)
         : engine_(engine), region_mgr_(region_mgr) {}
-    ~RDMACopyBackend() { cleanup(); }
+    ~RdmaCopyBackend() { cleanup(); }
 
     // Ensure that a buffer pair is ready for the given location with at least
     // the given length
@@ -69,7 +69,7 @@ class RDMACopyBackend {
     // Return 0 for success; non-zero for error; update num_done
     int processRequest(segment_id_t target_segment_id,
                        uint64_t target_progress_addr, std::vector<Task> &tasks,
-                       RDMACopyCtrlBlock *ctrl_block, int32_t &num_done);
+                       RdmaCopyCtrlBlock *ctrl_block, int32_t &num_done);
 
     void cleanup();
 
@@ -100,7 +100,7 @@ class RDMACopyBackend {
     // and last_updated_progress
     int tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
                                 int32_t &last_updated_num_done,
-                                int32_t num_done, RDMACopyCtrlBlock *ctrl_block,
+                                int32_t num_done, RdmaCopyCtrlBlock *ctrl_block,
                                 segment_id_t target_segment_id,
                                 uint64_t target_progress_addr);
 

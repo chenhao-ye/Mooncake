@@ -57,8 +57,8 @@ class CopyServer {
     // Copiable memory regions
     RegionMgr region_mgr_;
 
-    RDMACopyBackend rdma_copy_backend_;
-    TCPCopyBackend tcp_copy_backend_;
+    RdmaCopyBackend rdma_copy_backend_;
+    TcpCopyBackend tcp_copy_backend_;
 
     // Active client connections
     // Server is single-threaded, no mutex needed
@@ -73,17 +73,17 @@ class CopyServer {
 
     void workerThread();
 
-    int processRDMARequest(int client_fd);
-    int processTCPRequest(int client_fd);
+    int processRdmaRequest(int client_fd);
+    int processTcpRequest(int client_fd);
 
     // read segment name from fd into segment_name
     int readSegmentName(int client_fd, std::string &segment_name);
 
     // read RDMA requests from fd into tasks
-    int readRDMARequests(int client_fd, uint64_t &target_progress_addr,
-                         std::vector<RDMACopyBackend::Task> &tasks);
+    int readRdmaRequests(int client_fd, uint64_t &target_progress_addr,
+                         std::vector<RdmaCopyBackend::Task> &tasks);
 
     // read TCP requests from fd into tasks
-    int readTCPRequests(int client_fd,
-                        std::vector<TCPCopyBackend::Task> &tasks);
+    int readTcpRequests(int client_fd,
+                        std::vector<TcpCopyBackend::Task> &tasks);
 };

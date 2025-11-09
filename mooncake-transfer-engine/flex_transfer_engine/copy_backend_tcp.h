@@ -13,7 +13,7 @@
 
 class FlexTransferEngine;
 
-class TCPCopyBackend {
+class TcpCopyBackend {
    public:
     struct Task {
         void *source_addr;
@@ -21,7 +21,7 @@ class TCPCopyBackend {
     };
 
    public:
-    TCPCopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr)
+    TcpCopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr)
         : engine_(engine), region_mgr_(region_mgr) {}
 
     int processRequest(int client_fd);

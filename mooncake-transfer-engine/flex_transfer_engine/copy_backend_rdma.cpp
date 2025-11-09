@@ -6,12 +6,12 @@
 
 #include "flex_transfer_engine.h"
 
-void RDMACopyBackend::cleanup() {
+void RdmaCopyBackend::cleanup() {
     for (auto pair : buffer_pool_) freeBufferPair(pair);
     buffer_pool_.clear();
 }
 
-int RDMACopyBackend::prepareBufferPair(LocIdx loc_idx,
+int RdmaCopyBackend::prepareBufferPair(LocIdx loc_idx,
                                        const std::string &location,
                                        size_t length) {
     if (static_cast<size_t>(loc_idx) >= buffer_pool_.size()) {
@@ -30,10 +30,10 @@ int RDMACopyBackend::prepareBufferPair(LocIdx loc_idx,
     return 0;
 }
 
-int RDMACopyBackend::processRequest(segment_id_t target_segment_id,
+int RdmaCopyBackend::processRequest(segment_id_t target_segment_id,
                                     uint64_t target_progress_addr,
                                     std::vector<Task> &tasks,
-                                    RDMACopyCtrlBlock *ctrl_block,
+                                    RdmaCopyCtrlBlock *ctrl_block,
                                     int32_t &num_done) {
     // num_done is a lower bound watermark: if task_idx < num_done, it is done
     // and its batch_id is INVALID_BATCH; otherwise, it may or may not be done
@@ -135,7 +135,7 @@ cleanup:
     return -1;
 }
 
-int RDMACopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
+int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
                                  int target_segment_id) {
     int rc, status;
     Task &task = tasks[task_idx];
@@ -191,7 +191,7 @@ int RDMACopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     return 0;
 }
 
-RDMACopyBackend::BufferPair *RDMACopyBackend::allocBufferPair(
+RdmaCopyBackend::BufferPair *RdmaCopyBackend::allocBufferPair(
     LocIdx loc_idx, const std::string &location, size_t size) {
     bool is_cuda = location.find("cuda:") == 0;
     size_t total_size = 2 * size;  // allocate one contiguous buffer w/ 2*size
@@ -243,7 +243,7 @@ RDMACopyBackend::BufferPair *RDMACopyBackend::allocBufferPair(
     return pair;
 }
 
-void RDMACopyBackend::freeBufferPair(BufferPair *pair) {
+void RdmaCopyBackend::freeBufferPair(BufferPair *pair) {
     if (!pair) return;
 
     char *buffer_base = pair->buffers[0];
@@ -260,7 +260,7 @@ void RDMACopyBackend::freeBufferPair(BufferPair *pair) {
     delete pair;
 }
 
-int RDMACopyBackend::waitTask(Task &task) {
+int RdmaCopyBackend::waitTask(Task &task) {
     if (task.batch_id == INVALID_BATCH) return 0;
 
     int status = waitBatch(task.batch_id);
@@ -273,10 +273,10 @@ int RDMACopyBackend::waitTask(Task &task) {
 // Poll if the given progress_batch_id has finished; if so, submit another
 // progress update via atomic fetch-add, which will update progress_batch_id
 // and last_updated_num_done
-int RDMACopyBackend::tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
+int RdmaCopyBackend::tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
                                              int32_t &last_updated_num_done,
                                              int32_t num_done,
-                                             RDMACopyCtrlBlock *ctrl_block,
+                                             RdmaCopyCtrlBlock *ctrl_block,
                                              segment_id_t target_segment_id,
                                              uint64_t target_progress_addr) {
     int status, rc;
@@ -311,7 +311,7 @@ int RDMACopyBackend::tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
 // copyMemory is expected to succeed because the given src and dst must have
 // been validated; if an error occurs, it is our own fault, not due to invalid
 // input; throw the error instead of gracefully handling
-void RDMACopyBackend::copyMemory(void *dst, const void *src, size_t size,
+void RdmaCopyBackend::copyMemory(void *dst, const void *src, size_t size,
                                  bool is_cuda) {
     if (is_cuda) {
 #ifdef USE_CUDA
@@ -329,7 +329,7 @@ void RDMACopyBackend::copyMemory(void *dst, const void *src, size_t size,
     }
 }
 
-int RDMACopyBackend::submitBatch(batch_id_t &batch_id,
+int RdmaCopyBackend::submitBatch(batch_id_t &batch_id,
                                  transfer_request_t &req) {
     batch_id = ::allocateBatchID(engine_.getEngine(), 1);
     int rc = ::submitTransfer(engine_.getEngine(), batch_id, &req, 1);
@@ -337,13 +337,13 @@ int RDMACopyBackend::submitBatch(batch_id_t &batch_id,
     return rc;
 }
 
-void RDMACopyBackend::freeBatch(batch_id_t &batch_id) {
+void RdmaCopyBackend::freeBatch(batch_id_t &batch_id) {
     assert(batch_id != INVALID_BATCH);
     ::freeBatchID(engine_.getEngine(), batch_id);
     batch_id = INVALID_BATCH;
 }
 
-int RDMACopyBackend::pollBatch(batch_id_t batch_id) {
+int RdmaCopyBackend::pollBatch(batch_id_t batch_id) {
     assert(batch_id != INVALID_BATCH);
     [[maybe_unused]] int rc;
     transfer_status_t status;
@@ -354,7 +354,7 @@ int RDMACopyBackend::pollBatch(batch_id_t batch_id) {
 
 // Wait until the given batch (size=1) is done and then free the batch; will
 // update batch_id to INVALID_BATCH; return the status
-int RDMACopyBackend::waitBatch(batch_id_t &batch_id) {
+int RdmaCopyBackend::waitBatch(batch_id_t &batch_id) {
     assert(batch_id != INVALID_BATCH);
 
     int status;

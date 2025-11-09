@@ -6,4 +6,4 @@
 
 #include "flex_transfer_engine.h"
 
-int TCPCopyBackend::processRequest(int client_fd) { return 0; }
+int TcpCopyBackend::processRequest(int client_fd) { return 0; }

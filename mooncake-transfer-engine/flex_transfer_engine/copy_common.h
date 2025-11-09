@@ -12,10 +12,10 @@ enum class CopyMode : uint32_t { RDMA, TCP };
 /**
  * Used by both CopyClient and CopyServer. Must be register with remote_atomic.
  */
-struct RDMACopyCtrlBlock {
+struct RdmaCopyCtrlBlock {
     volatile std::atomic_int64_t progress_counter = 0;
     uint64_t padding[7];
 };
 
-static_assert(sizeof(RDMACopyCtrlBlock) == 64,
-              "RDMACopyCtrlBlock must be 64-byte");
+static_assert(sizeof(RdmaCopyCtrlBlock) == 64,
+              "RdmaCopyCtrlBlock must be 64-byte");

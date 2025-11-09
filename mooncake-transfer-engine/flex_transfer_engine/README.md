@@ -24,7 +24,7 @@ This implementation includes:
 - Segment cache for opened remote segments
 - CopyServer (when `enable_copy = true`) for accepting copy requests
 - CopyClient for submitting requests to remote CopyServers
-- RDMACopyCtrlBlock cache for progress tracking
+- RdmaCopyCtrlBlock cache for progress tracking
 
 **Constructor:**
 ```cpp
@@ -36,7 +36,7 @@ FlexTransferEngine(const std::string &metadata_conn_string,
 - `metadata_conn_string`: Metadata server URL (e.g., "http://127.0.0.1:8080/metadata")
 - `local_server_name`: Local segment name for this engine
 - `enable_copy`: If true, starts TCP listener for copy-based transfers
-- `ctrl_block_location`: Memory location for RDMACopyCtrlBlock (e.g., "cpu:0", must be CPU)
+- `ctrl_block_location`: Memory location for RdmaCopyCtrlBlock (e.g., "cpu:0", must be CPU)
 
 ### FlexBatch
 

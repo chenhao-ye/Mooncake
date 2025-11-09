@@ -14,7 +14,7 @@ class FlexTransferEngine;
 /**
  * FlexBatch represents a batch transfer operation.
  * It manages the batch lifecycle including freeing the batch ID and
- * returning the RDMACopyCtrlBlock to the engine cache on destruction.
+ * returning the RdmaCopyCtrlBlock to the engine cache on destruction.
  */
 class FlexBatch {
    public:
@@ -66,7 +66,7 @@ class FlexBatch {
     batch_id_t batch_id_;
 
     // for copy transfer
-    RDMACopyCtrlBlock *ctrl_block_;
+    RdmaCopyCtrlBlock *ctrl_block_;
     // once see a progress that implies fully finished OR received a int32_t
     // from the socket, it means this batch is done with the connection; then
     // set client_conn_ to nullptr

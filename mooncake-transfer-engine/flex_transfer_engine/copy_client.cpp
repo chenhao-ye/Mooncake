@@ -50,13 +50,13 @@ void CopyClient::freeConnection(ClientConnection *conn) {
     delete conn;
 }
 
-void CopyClient::submitRDMARequests(std::vector<transfer_request_t> &entries,
+void CopyClient::submitRdmaRequests(std::vector<transfer_request_t> &entries,
                                     ClientConnection *conn,
-                                    RDMACopyCtrlBlock *ctrl_block) {
+                                    RdmaCopyCtrlBlock *ctrl_block) {
     assert(ctrl_block);
 
     writeSegmentName(conn->fd);
-    writeRDMARequests(conn->fd, entries, ctrl_block);
+    writeRdmaRequests(conn->fd, entries, ctrl_block);
 
     // The remote CopyServer will now process the requests asynchronously
     // and update the progress counter via RDMA writes. The caller should
@@ -84,9 +84,9 @@ void CopyClient::writeSegmentName(int fd) {
         throw std::runtime_error("Failed to send segment name to CopyServer");
 }
 
-void CopyClient::writeRDMARequests(int fd,
+void CopyClient::writeRdmaRequests(int fd,
                                    std::vector<transfer_request_t> &entries,
-                                   RDMACopyCtrlBlock *ctrl_block) {
+                                   RdmaCopyCtrlBlock *ctrl_block) {
     // Send batch info
     struct Header {
         uint64_t progress_addr;

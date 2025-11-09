@@ -64,7 +64,7 @@ class FlexTransferEngine {
      * @param metadata_conn_string Connection string for metadata server
      * @param local_server_name Local server name
      * @param enable_copy If true, starts TCP listener for copy-based transfers
-     * @param ctrl_block_location Location for RDMACopyCtrlBlock registration
+     * @param ctrl_block_location Location for RdmaCopyCtrlBlock registration
      * (e.g., "cpu:0")
      */
     explicit FlexTransferEngine(const std::string &metadata_conn_string,
@@ -111,9 +111,9 @@ class FlexTransferEngine {
 
     segment_id_t getSegmentId(const std::string &segment_name);
 
-    RDMACopyCtrlBlock *allocRDMACopyCtrlBlock();
+    RdmaCopyCtrlBlock *allocRdmaCopyCtrlBlock();
 
-    void freeRDMACopyCtrlBlock(RDMACopyCtrlBlock *ctrl_block);
+    void freeRdmaCopyCtrlBlock(RdmaCopyCtrlBlock *ctrl_block);
 
    private:
     const bool enable_copy_;  // Whether to enable copy-based transfer
@@ -127,8 +127,8 @@ class FlexTransferEngine {
     std::unordered_map<std::string, segment_id_t> segment_cache_;
     std::mutex segment_cache_mutex_;
 
-    // Cache of RDMACopyCtrlBlock objects for copy-based transfers
-    std::vector<RDMACopyCtrlBlock *> ctrl_block_cache_;
+    // Cache of RdmaCopyCtrlBlock objects for copy-based transfers
+    std::vector<RdmaCopyCtrlBlock *> ctrl_block_cache_;
     std::mutex ctrl_block_mutex_;
 
     // TCP listener and worker (only used when enable_copy is true)

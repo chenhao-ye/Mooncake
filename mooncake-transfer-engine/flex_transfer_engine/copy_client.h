@@ -62,14 +62,14 @@ class CopyClient {
      * @param ctrl_block Control block for progress tracking
      * @return connection pointer
      */
-    void submitRDMARequests(std::vector<transfer_request_t> &entries,
+    void submitRdmaRequests(std::vector<transfer_request_t> &entries,
                             ClientConnection *conn,
-                            RDMACopyCtrlBlock *ctrl_block);
+                            RdmaCopyCtrlBlock *ctrl_block);
 
    private:
     void writeSegmentName(int fd);
-    void writeRDMARequests(int fd, std::vector<transfer_request_t> &entries,
-                           RDMACopyCtrlBlock *ctrl_block);
+    void writeRdmaRequests(int fd, std::vector<transfer_request_t> &entries,
+                           RdmaCopyCtrlBlock *ctrl_block);
 
     /**
      * Connect to a remote CopyServer.

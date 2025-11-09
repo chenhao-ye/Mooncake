@@ -19,7 +19,7 @@ void FlexBatch::free() {
         batch_id_ = INVALID_BATCH;
     }
     if (ctrl_block_) {
-        engine_->freeRDMACopyCtrlBlock(ctrl_block_);
+        engine_->freeRdmaCopyCtrlBlock(ctrl_block_);
         ctrl_block_ = nullptr;
     }
     if (client_conn_) {
@@ -67,8 +67,8 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy,
     auto &copy_client = engine_->getCopyClient();
     client_conn_ = copy_client.allocConnection(target);
     if (use_rdma) {
-        ctrl_block_ = engine_->allocRDMACopyCtrlBlock();
-        copy_client.submitRDMARequests(entries_, client_conn_, ctrl_block_);
+        ctrl_block_ = engine_->allocRdmaCopyCtrlBlock();
+        copy_client.submitRdmaRequests(entries_, client_conn_, ctrl_block_);
     } else {
         // TODO: add TCP support
     }

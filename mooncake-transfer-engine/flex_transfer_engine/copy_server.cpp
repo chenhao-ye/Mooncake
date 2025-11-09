@@ -262,7 +262,7 @@ void CopyServer::workerThread() {
             }
 
             // Handle client data
-            int rc = processRDMARequest(ready_fd);
+            int rc = processRdmaRequest(ready_fd);
             if (rc != 0) {
                 // Error occurred or client disconnected, close and remove
                 std::cerr << "Closing client connection fd=" << ready_fd
@@ -284,20 +284,20 @@ cleanup:
     std::cerr << "Worker thread stopped" << std::endl;
 }
 
-int CopyServer::processRDMARequest(int client_fd) {
+int CopyServer::processRdmaRequest(int client_fd) {
     int rc;
     std::string segment_name;
     uint64_t target_progress_addr = 0;
-    std::vector<RDMACopyBackend::Task> tasks;
+    std::vector<RdmaCopyBackend::Task> tasks;
     segment_id_t target_segment_id;
-    RDMACopyCtrlBlock *ctrl_block = nullptr;
+    RdmaCopyCtrlBlock *ctrl_block = nullptr;
     int32_t num_done = 0;
     bool success = false;
 
     rc = readSegmentName(client_fd, segment_name);
     if (rc) goto cleanup;
 
-    rc = readRDMARequests(client_fd, target_progress_addr, tasks);
+    rc = readRdmaRequests(client_fd, target_progress_addr, tasks);
     if (rc) goto cleanup;
 
     target_segment_id = engine_.getSegmentId(segment_name);
@@ -306,9 +306,9 @@ int CopyServer::processRDMARequest(int client_fd) {
         goto cleanup;
     }
 
-    ctrl_block = engine_.allocRDMACopyCtrlBlock();
+    ctrl_block = engine_.allocRdmaCopyCtrlBlock();
     if (!ctrl_block) {
-        std::cerr << "Failed to acquire RDMACopyCtrlBlock" << std::endl;
+        std::cerr << "Failed to acquire RdmaCopyCtrlBlock" << std::endl;
         goto cleanup;
     }
 
@@ -321,7 +321,7 @@ int CopyServer::processRDMARequest(int client_fd) {
     }
 
 cleanup:
-    if (ctrl_block) engine_.freeRDMACopyCtrlBlock(ctrl_block);
+    if (ctrl_block) engine_.freeRdmaCopyCtrlBlock(ctrl_block);
 
     // Send completion count via socket (i.e., num_done)
     // If this fails, the connection should be closed
@@ -366,8 +366,8 @@ int CopyServer::readSegmentName(int client_fd, std::string &segment_name) {
 }
 
 // read RDMA requests from fd into tasks
-int CopyServer::readRDMARequests(int client_fd, uint64_t &target_progress_addr,
-                                 std::vector<RDMACopyBackend::Task> &tasks) {
+int CopyServer::readRdmaRequests(int client_fd, uint64_t &target_progress_addr,
+                                 std::vector<RdmaCopyBackend::Task> &tasks) {
     struct Header {
         uint64_t progress_addr;
         uint64_t num_reqs;
@@ -417,7 +417,7 @@ int CopyServer::readRDMARequests(int client_fd, uint64_t &target_progress_addr,
 }
 
 // read TCP requests from fd into tasks
-int readTCPRequests(int client_fd, std::vector<TCPCopyBackend::Task> &tasks) {
+int readTcpRequests(int client_fd, std::vector<TcpCopyBackend::Task> &tasks) {
     ssize_t nbytes;
     uint64_t num_reqs;
     nbytes = readFully(client_fd, &num_reqs, sizeof(num_reqs));

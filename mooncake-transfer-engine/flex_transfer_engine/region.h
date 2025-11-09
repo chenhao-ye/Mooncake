@@ -24,6 +24,10 @@ struct Region {
 // Not thread-safe; caller must hold regions_mutex_
 class RegionMgr {
    public:
+    std::mutex regions_mutex_;
+
+   public:
+    RegionMgr() = default;
     LocId getLocId(const std::string &location) {
         // extract CUDA device from location string (e.g., "cuda:0" -> 0)
         int32_t cuda_device = -1;  // -1 for CPU

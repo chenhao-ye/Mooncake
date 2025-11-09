@@ -31,8 +31,11 @@ FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
                                        const std::string &ctrl_block_location)
     : enable_copy_(enable_copy),
       ctrl_block_location_(ctrl_block_location),
-      copy_server_(*this),
-      copy_client_(local_server_name) {
+      region_mgr_(),
+      rdma_copy_backend_(*this, region_mgr_),
+      tcp_copy_backend_(*this, region_mgr_),
+      copy_server_(*this, region_mgr_, rdma_copy_backend_, tcp_copy_backend_),
+      copy_client_(local_server_name, tcp_copy_backend_) {
     if (ctrl_block_location.find("cuda:") == 0) {
         throw std::invalid_argument(
             "ctrl_block_location must not be on CUDA: " + ctrl_block_location);

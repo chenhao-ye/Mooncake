@@ -19,11 +19,13 @@ class FlexTransferEngine;
 
 class CopyServer {
    public:
-    CopyServer(FlexTransferEngine &engine)
+    CopyServer(FlexTransferEngine &engine, RegionMgr &region_mgr,
+               RdmaCopyBackend &rdma_copy_backend,
+               TcpCopyBackend &tcp_copy_backend)
         : engine_(engine),
-          region_mgr_(),
-          rdma_copy_backend_(engine, region_mgr_),
-          tcp_copy_backend_(engine, region_mgr_),
+          region_mgr_(region_mgr),
+          rdma_copy_backend_(rdma_copy_backend),
+          tcp_copy_backend_(tcp_copy_backend),
           worker_running_(false),
           listener_fd_(-1),
           stop_event_fd_(-1),
@@ -51,14 +53,10 @@ class CopyServer {
     // Back pointer to FlexTransferEngine
     FlexTransferEngine &engine_;
 
-    // Protects region_mgr_, rdma_copy_backend_, and tcp_copy_backend_
-    std::mutex regions_mutex_;
-
     // Copiable memory regions
-    RegionMgr region_mgr_;
-
-    RdmaCopyBackend rdma_copy_backend_;
-    TcpCopyBackend tcp_copy_backend_;
+    RegionMgr &region_mgr_;
+    RdmaCopyBackend &rdma_copy_backend_;
+    TcpCopyBackend &tcp_copy_backend_;
 
     // Active client connections
     // Server is single-threaded, no mutex needed

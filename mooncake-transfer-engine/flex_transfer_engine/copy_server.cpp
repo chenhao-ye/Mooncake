@@ -30,13 +30,13 @@
 void CopyServer::cleanup() {
     stopListener();
 
-    std::lock_guard<std::mutex> lock(regions_mutex_);
+    std::lock_guard<std::mutex> lock(region_mgr_.regions_mutex_);
     rdma_copy_backend_.cleanup();
 }
 
 int CopyServer::registerLocalMemory(void *addr, size_t length,
                                     const std::string &location) {
-    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+    std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
 
     LocId loc_id = region_mgr_.getLocId(location);
     region_mgr_.addRegion(addr, length, loc_id);
@@ -54,13 +54,13 @@ err:
 }
 
 int CopyServer::unregisterLocalMemory(void *addr) {
-    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+    std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
     return region_mgr_.removeRegion(addr);
 }
 
 int CopyServer::registerLocalMemoryBatch(
     std::vector<buffer_entry_t> &buffer_list, const std::string &location) {
-    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+    std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
     LocId loc_id = region_mgr_.getLocId(location);
     size_t max_size = 0;
 
@@ -83,7 +83,7 @@ err:
 
 int CopyServer::unregisterLocalMemoryBatch(std::vector<uintptr_t> &addr_list) {
     bool all_success = true;
-    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+    std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
     for (uintptr_t addr : addr_list) {
         int rc = region_mgr_.removeRegion(reinterpret_cast<void *>(addr));
         if (rc) all_success = false;  // not found, but will continue
@@ -332,7 +332,7 @@ int CopyServer::processRdmaRequest(int client_fd) {
     }
 
     {
-        std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+        std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
         rc = rdma_copy_backend_.processRequest(target_segment_id,
                                                target_progress_addr, tasks,
                                                ctrl_block, num_done);
@@ -362,7 +362,7 @@ int CopyServer::processTcpRequest(int client_fd) {
     rc = readTcpRequests(client_fd, tasks);
     if (rc) return -1;
 
-    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+    std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
     return tcp_copy_backend_.processRequest(client_fd, tasks);
 }
 

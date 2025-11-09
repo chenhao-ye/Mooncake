@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "copy_backend_tcp.h"
 #include "copy_common.h"
 #include "transfer_engine_c.h"
 
@@ -46,8 +47,10 @@ struct ClientConnection {
  */
 class CopyClient {
    public:
-    CopyClient(const std::string local_segment_name)
-        : local_segment_name_(local_segment_name) {}
+    CopyClient(const std::string local_segment_name,
+               TcpCopyBackend &tcp_copy_backend)
+        : local_segment_name_(local_segment_name),
+          tcp_copy_backend_(tcp_copy_backend) {}
     ~CopyClient();
 
     ClientConnection *allocConnection(const std::string &server_url);
@@ -79,6 +82,8 @@ class CopyClient {
 
     // Let the remote CopyServer know where to submit RDMA write
     const std::string local_segment_name_;
+
+    TcpCopyBackend &tcp_copy_backend_;
 
     // Cached TCP connections to remote CopyServers (server_url -> connection)
     std::unordered_map<std::string, ClientConnection *> connection_cache_;

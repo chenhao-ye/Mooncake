@@ -131,6 +131,11 @@ class FlexTransferEngine {
     std::vector<RdmaCopyCtrlBlock *> ctrl_block_cache_;
     std::mutex ctrl_block_mutex_;
 
+    RegionMgr region_mgr_;
+
+    RdmaCopyBackend rdma_copy_backend_;
+    TcpCopyBackend tcp_copy_backend_;
+
     // TCP listener and worker (only used when enable_copy is true)
     CopyServer copy_server_;
 

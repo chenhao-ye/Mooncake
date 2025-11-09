@@ -56,6 +56,11 @@ class RegionMgr {
         return nullptr;
     }
 
+    // Require regions_mutex_ to be held before calling
+    const std::string &getLocation(LocIdx loc_idx) const {
+        return location_strings_[loc_idx];
+    }
+
    private:
     // Copiable memory regions (addr -> region info)
     // Tracks regions that can be read via copy transfer.

@@ -61,6 +61,11 @@ class RdmaCopyBackend {
 #endif
         }
 
+        BufferPair(const BufferPair &) = delete;
+        BufferPair(BufferPair &&) = delete;
+        BufferPair &operator=(const BufferPair &) = delete;
+        BufferPair &operator=(BufferPair &&) = delete;
+
         // select the next buffer to use
         // return the one with a lower-index task (likely to finish earlier OR
         // is free for users[i]<0)

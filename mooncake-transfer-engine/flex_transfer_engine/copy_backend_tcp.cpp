@@ -63,15 +63,14 @@ void TcpCopyBackend::cleanup() {
 #endif
 }
 
-bool TcpCopyBackend::getNextChunk(size_t &task_idx, size_t &chunk_offset,
-                                  std::vector<Task> &tasks, int buffer_idx,
-                                  ChunkIter &iter_out) {
+bool TcpCopyBackend::getNextChunk(TaskIter &task_iter, std::vector<Task> &tasks,
+                                  int buffer_idx, ChunkIter &iter_out) {
     // iterate through tasks to find the next chunk
-    while (task_idx < tasks.size()) {
-        Task &task = tasks[task_idx];
-        if (chunk_offset >= task.length) {  // move to next task
-            task_idx++;
-            chunk_offset = 0;
+    while (task_iter.task_idx < tasks.size()) {
+        Task &task = tasks[task_iter.task_idx];
+        if (task_iter.chunk_offset >= task.length) {  // move to next task
+            task_iter.task_idx++;
+            task_iter.chunk_offset = 0;
             continue;
         }
 
@@ -85,17 +84,26 @@ bool TcpCopyBackend::getNextChunk(size_t &task_idx, size_t &chunk_offset,
             }
         }
 
-        iter_out.loc_id = task.region->loc_id;
         iter_out.source_addr =
-            static_cast<char *>(task.source_addr) + chunk_offset;
-        size_t remaining = task.length - chunk_offset;
+            static_cast<char *>(task.source_addr) + task_iter.chunk_offset;
+        size_t remaining = task.length - task_iter.chunk_offset;
+        iter_out.loc_id = task.region->loc_id;
+
+        // Chunk only for CUDA memory; CPU memory can be sent directly
+        if (task.region->loc_id.isCuda()) {
 #ifdef USE_CUDA
-        iter_out.length = std::min(remaining, BufferPair::kBufferSize);
+            iter_out.length = std::min(remaining, BufferPair::kBufferSize);
 #else
-        iter_out.length = remaining;  // No chunking for CPU-only builds
+            // should not happen because register has checked CUDA support
+            throw std::runtime_error(
+                "CUDA memory encountered but CUDA support not compiled");
 #endif
+        } else {
+            iter_out.length = remaining;  // Send entire remaining data for CPU
+        }
+
         iter_out.buffer_idx = buffer_idx;
-        chunk_offset += iter_out.length;
+        task_iter.chunk_offset += iter_out.length;
         return true;
     }
 
@@ -103,16 +111,15 @@ bool TcpCopyBackend::getNextChunk(size_t &task_idx, size_t &chunk_offset,
 }
 
 int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
+    if (tasks.empty()) return 0;
+
 #ifdef USE_CUDA
     // Initialize buffer pair on first use (only needed for CUDA)
     if (!buffer_pair_) buffer_pair_ = new BufferPair();
 #endif
 
-    if (tasks.empty()) return 0;
-
     // Iteration state for chunk traversal
-    size_t task_idx = 0;
-    size_t chunk_offset = 0;
+    TaskIter task_iter;
 
     // Use two ChunkIter objects and swap pointers to avoid copying
     ChunkIter chunk_iters[2];
@@ -126,11 +133,11 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 #endif
 
     // ===== Phase 1: Prime the pipeline =====
-    // Get first chunk
-    if (!getNextChunk(task_idx, chunk_offset, tasks, buffer_idx, *curr))
+    // Start async CUDA copy for the first two chunks (skip if not CUDA)
+
+    if (!getNextChunk(task_iter, tasks, buffer_idx, *curr))
         throw std::runtime_error("Failed to get first chunk");
 
-    // Start async copy for first chunk if CUDA
     if (curr->loc_id.isCuda()) {
 #ifdef USE_CUDA
         if (curr_device != curr->loc_id.cuda_device) {
@@ -149,19 +156,70 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
             throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
                                      cudaGetErrorString(err));
         }
-#else
-        throw std::runtime_error(
-            "GPU memory copy requested but CUDA support not compiled");
-#endif
+#endif  // skip else check because getNextChunk has already checked
     }
 
-    // Get second chunk and start its copy (prepare ahead)
-    buffer_idx = 1 - buffer_idx;  // Toggle buffer
-    bool has_next =
-        getNextChunk(task_idx, chunk_offset, tasks, buffer_idx, *next);
-    if (has_next) {
-        if (next->loc_id.isCuda()) {
+    buffer_idx = 1 - buffer_idx;  // toggle
+    bool has_next = getNextChunk(task_iter, tasks, buffer_idx, *next);
 #ifdef USE_CUDA
+    if (has_next && next->loc_id.isCuda()) {
+        if (curr_device != next->loc_id.cuda_device) {
+            cudaError_t err = cudaSetDevice(next->loc_id.cuda_device);
+            if (err != cudaSuccess) {
+                throw std::runtime_error(std::string("cudaSetDevice failed: ") +
+                                         cudaGetErrorString(err));
+            }
+            curr_device = next->loc_id.cuda_device;
+        }
+
+        cudaError_t err = cudaMemcpyAsync(
+            buffer_pair_->buffers[buffer_idx], next->source_addr, next->length,
+            cudaMemcpyDeviceToHost, buffer_pair_->streams[buffer_idx]);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
+                                     cudaGetErrorString(err));
+        }
+    }
+#endif  // skip else check because getNextChunk has already checked
+
+    // ===== Phase 2: Main pipeline loop =====
+    // Repeat:
+    // - wait for curr chunk to finish copy
+    // - send curr chunk
+    // - start async CUDA copy for next chunk
+    while (has_next) {
+#ifdef USE_CUDA
+        // Wait for curr chunk to complete copy; no need waiting for CPU memory
+        if (curr->loc_id.isCuda()) {
+            cudaError_t err =
+                cudaStreamSynchronize(buffer_pair_->streams[curr->buffer_idx]);
+            if (err != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string("cudaStreamSynchronize failed: ") +
+                    cudaGetErrorString(err));
+            }
+        }
+#endif
+
+        // Send current chunk
+        void *send_addr = curr->source_addr;
+#ifdef USE_CUDA
+        if (curr->loc_id.isCuda()) {
+            send_addr = buffer_pair_->buffers[curr->buffer_idx];
+        }
+#endif
+        ssize_t nbytes = writeFully(client_fd, send_addr, curr->length);
+        if (nbytes != static_cast<ssize_t>(curr->length)) return -1;
+
+        // advance pipeline: swap curr and next, and start next async copy
+        ChunkIter *temp = curr;
+        curr = next;
+        next = temp;
+
+        buffer_idx = 1 - buffer_idx;  // toggle
+        has_next = getNextChunk(task_iter, tasks, buffer_idx, *next);
+#ifdef USE_CUDA
+        if (has_next && next->loc_id.isCuda()) {
             if (curr_device != next->loc_id.cuda_device) {
                 cudaError_t err = cudaSetDevice(next->loc_id.cuda_device);
                 if (err != cudaSuccess) {
@@ -181,74 +239,8 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
                     std::string("cudaMemcpyAsync failed: ") +
                     cudaGetErrorString(err));
             }
-#else
-            throw std::runtime_error(
-                "GPU memory copy requested but CUDA support not compiled");
-#endif
-        }
-    }
-
-    // ===== Phase 2: Main pipeline loop =====
-    while (has_next) {
-        // Wait for curr chunk to complete copy
-#ifdef USE_CUDA
-        if (curr->loc_id.isCuda()) {
-            cudaError_t err =
-                cudaStreamSynchronize(buffer_pair_->streams[curr->buffer_idx]);
-            if (err != cudaSuccess) {
-                throw std::runtime_error(
-                    std::string("cudaStreamSynchronize failed: ") +
-                    cudaGetErrorString(err));
-            }
         }
 #endif
-
-        // Send curr chunk
-        void *send_addr = curr->source_addr;
-#ifdef USE_CUDA
-        if (curr->loc_id.isCuda()) {
-            send_addr = buffer_pair_->buffers[curr->buffer_idx];
-        }
-#endif
-        ssize_t nbytes = writeFully(client_fd, send_addr, curr->length);
-        if (nbytes != static_cast<ssize_t>(curr->length)) {
-            return -1;  // Network error - external failure, return gracefully
-        }
-
-        // Advance pipeline: swap pointers instead of copying
-        ChunkIter *temp = curr;
-        curr = next;
-        next = temp;
-
-        // Get next chunk and start its copy
-        buffer_idx = 1 - buffer_idx;  // Toggle buffer
-        has_next =
-            getNextChunk(task_idx, chunk_offset, tasks, buffer_idx, *next);
-        if (has_next) {
-#ifdef USE_CUDA
-            if (next->loc_id.isCuda()) {
-                if (curr_device != next->loc_id.cuda_device) {
-                    cudaError_t err = cudaSetDevice(next->loc_id.cuda_device);
-                    if (err != cudaSuccess) {
-                        throw std::runtime_error(
-                            std::string("cudaSetDevice failed: ") +
-                            cudaGetErrorString(err));
-                    }
-                    curr_device = next->loc_id.cuda_device;
-                }
-
-                cudaError_t err = cudaMemcpyAsync(
-                    buffer_pair_->buffers[buffer_idx], next->source_addr,
-                    next->length, cudaMemcpyDeviceToHost,
-                    buffer_pair_->streams[buffer_idx]);
-                if (err != cudaSuccess) {
-                    throw std::runtime_error(
-                        std::string("cudaMemcpyAsync failed: ") +
-                        cudaGetErrorString(err));
-                }
-            }
-#endif
-        }
     }
 
     // ===== Phase 3: Drain the last chunk =====

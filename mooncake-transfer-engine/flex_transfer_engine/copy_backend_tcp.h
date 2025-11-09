@@ -65,11 +65,15 @@ class TcpCopyBackend {
         int buffer_idx{0};
     };
 
+    struct TaskIter {
+        size_t task_idx{0};
+        size_t chunk_offset{0};
+    };
+
     // Helper function to get the next chunk from the task sequence
-    // Advances task_idx and chunk_offset as chunks are consumed
-    bool getNextChunk(size_t &task_idx, size_t &chunk_offset,
-                      std::vector<Task> &tasks, int buffer_idx,
-                      ChunkIter &iter_out);
+    // Advances TaskIter as chunks are consumed
+    bool getNextChunk(TaskIter &task_iter, std::vector<Task> &tasks,
+                      int buffer_idx, ChunkIter &iter_out);
 
     FlexTransferEngine &engine_;
     RegionMgr &region_mgr_;

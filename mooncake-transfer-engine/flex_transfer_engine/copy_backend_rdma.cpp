@@ -167,7 +167,7 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     void *buffer = buffer_pair.buffers[buffer_idx];
 
     // Copy data from source to buffer
-    copyMemory(buffer, task.source_addr, task.length, buffer_pair.is_cuda);
+    copyMemory(buffer, task.source_addr, task.length, buffer_pair);
 
     // Submit RDMA write from buffer to remote target
     transfer_request_t req = {
@@ -312,13 +312,23 @@ int RdmaCopyBackend::tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
 // been validated; if an error occurs, it is our own fault, not due to invalid
 // input; throw the error instead of gracefully handling
 void RdmaCopyBackend::copyMemory(void *dst, const void *src, size_t size,
-                                 bool is_cuda) {
-    if (is_cuda) {
+                                 BufferPair &buffer_pair) {
+    if (buffer_pair.is_cuda) {
 #ifdef USE_CUDA
-        cudaError_t err = cudaMemcpy(dst, src, size, cudaMemcpyDefault);
+        // Async copy to GPU
+        cudaError_t err = cudaMemcpyAsync(dst, src, size, cudaMemcpyDefault,
+                                          buffer_pair.cuda_stream);
         if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("cudaMemcpy failed: ") +
+            throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
                                      cudaGetErrorString(err));
+        }
+
+        // Wait for the copy to complete
+        err = cudaStreamSynchronize(buffer_pair.cuda_stream);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("cudaStreamSynchronize failed: ") +
+                cudaGetErrorString(err));
         }
 #else
         throw std::runtime_error(

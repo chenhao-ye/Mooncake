@@ -9,6 +9,10 @@
 #include "region.h"
 #include "transfer_engine_c.h"
 
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
+
 class FlexTransferEngine;
 
 class RdmaCopyBackend {
@@ -23,11 +27,39 @@ class RdmaCopyBackend {
         // Used by tasks with given index (-1 for unused)
         int users[2] = {-1, -1};
 
+#ifdef USE_CUDA
+        cudaStream_t cuda_stream;
+#endif
+
         BufferPair(char *buffer_base, size_t size, bool is_cuda)
             : buffers{buffer_base, buffer_base + size},
               size(size),
               is_cuda(is_cuda),
-              users{-1, -1} {}
+              users{-1, -1}
+#ifdef USE_CUDA
+              ,
+              cuda_stream(nullptr)
+#endif
+        {
+#ifdef USE_CUDA
+            if (is_cuda) {
+                cudaError_t err = cudaStreamCreate(&cuda_stream);
+                if (err != cudaSuccess) {
+                    throw std::runtime_error(
+                        std::string("Failed to create CUDA stream: ") +
+                        cudaGetErrorString(err));
+                }
+            }
+#endif
+        }
+
+        ~BufferPair() {
+#ifdef USE_CUDA
+            if (is_cuda && cuda_stream) {
+                cudaStreamDestroy(cuda_stream);
+            }
+#endif
+        }
 
         // select the next buffer to use
         // return the one with a lower-index task (likely to finish earlier OR
@@ -86,7 +118,9 @@ class RdmaCopyBackend {
     void freeBufferPair(BufferPair *pair);
 
     // Copy memory from src to dst; handle both CPU and CUDA memory
-    void copyMemory(void *dst, const void *src, size_t size, bool is_cuda);
+    // For CUDA memory, uses async copy with the stream from buffer_pair
+    void copyMemory(void *dst, const void *src, size_t size,
+                    BufferPair &buffer_pair);
 
     // Execute the task specified by task_idx
     int executeTask(std::vector<Task> &tasks, size_t task_idx,

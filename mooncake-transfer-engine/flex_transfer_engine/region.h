@@ -9,6 +9,8 @@
 struct LocId {
     uint32_t idx;         // index into location_strings_
     int32_t cuda_device;  // -1 for CPU
+
+    bool isCuda() const { return cuda_device >= 0; }
 };
 
 static_assert(sizeof(LocId) == sizeof(uint64_t), "LocId size must be 8 bytes");

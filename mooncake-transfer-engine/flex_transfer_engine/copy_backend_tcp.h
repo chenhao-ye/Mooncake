@@ -18,9 +18,25 @@
 class FlexTransferEngine;
 
 class TcpCopyBackend {
+   public:
+    struct Task {
+        void *source_addr;
+        size_t length;
+
+        Task(void *source_addr, size_t length)
+            : source_addr(source_addr), length(length) {}
+    };
+
+   public:
+    TcpCopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr);
+    ~TcpCopyBackend() { cleanup(); }
+
+    int processRequest(int client_fd, std::vector<Task> &tasks);
+
+    void cleanup();
+
    private:
 #ifdef USE_CUDA
-
     struct BufferPair {
         // Fixed buffer size for chunked transfers (only needed for CUDA)
         static constexpr size_t kBufferSize = 2 * 1024 * 1024;  // 2 MB
@@ -40,32 +56,24 @@ class TcpCopyBackend {
     };
 #endif
 
-   public:
-    struct Task {
-        void *source_addr;
-        size_t length;
-
-        Task(void *source_addr, size_t length)
-            : source_addr(source_addr), length(length) {}
+    // Helper structure to represent a single chunk within the pipeline
+    struct ChunkIter {
+        void *source_addr{nullptr};
+        size_t length{0};
+        LocId loc_id{0, -1};
+        int buffer_idx{0};
     };
 
-   public:
-    TcpCopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr);
-    ~TcpCopyBackend() { cleanup(); }
+    // Helper function to get the next chunk from the task sequence
+    // Advances task_idx and chunk_offset as chunks are consumed
+    bool getNextChunk(size_t &task_idx, size_t &chunk_offset,
+                      const std::vector<Task> &tasks, int buffer_idx,
+                      ChunkIter &iter_out);
 
-    int processRequest(int client_fd, std::vector<Task> &tasks);
-
-    void cleanup();
-
-   private:
     FlexTransferEngine &engine_;
     RegionMgr &region_mgr_;
 
 #ifdef USE_CUDA
     BufferPair *buffer_pair_;
 #endif
-
-    // Process a single task with chunked transfer
-    // Returns 0 on success, -1 on error
-    int processTask(int client_fd, Task &task);
 };

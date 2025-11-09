@@ -144,7 +144,7 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     RegionMgr::Region *region =
         region_mgr_.getRegion(task.source_addr, task.length);
     if (!region) {
-        std::cerr << "Source address " << task.source_addr
+        std::cerr << "Source address 0x" << std::hex << task.source_addr
                   << " not in registered copiable regions" << std::endl;
         return -1;
     }

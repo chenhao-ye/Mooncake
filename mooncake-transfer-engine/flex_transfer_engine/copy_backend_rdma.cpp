@@ -141,7 +141,7 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     Task &task = tasks[task_idx];
     // delayed source address validation:
     // if source_addr is invalid, will be detected here
-    RegionMgr::Region *region =
+    Region *region =
         region_mgr_.getRegion(task.source_addr, task.length);
     if (!region) {
         std::cerr << "Source address 0x" << std::hex << task.source_addr

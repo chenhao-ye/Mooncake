@@ -87,34 +87,23 @@ void CopyClient::writeSegmentName(int fd) {
 void CopyClient::writeRdmaRequests(int fd,
                                    std::vector<transfer_request_t> &entries,
                                    RdmaCopyCtrlBlock *ctrl_block) {
-    // Send batch info
-    struct Header {
-        uint64_t progress_addr;
-        uint64_t num_reqs;
-    };
-
     ssize_t nbytes;
-    Header header{.progress_addr =
-                      reinterpret_cast<uint64_t>(&ctrl_block->progress_counter),
-                  .num_reqs = entries.size()};
+    RdmaHeader header{.progress_addr = reinterpret_cast<uint64_t>(
+                          &ctrl_block->progress_counter),
+                      .num_reqs = entries.size()};
 
     nbytes = writeFully(fd, &header, sizeof(header));
     if (nbytes != sizeof(header))
         throw std::runtime_error("Failed to send batch info to CopyServer");
 
-    struct Req {
-        uint64_t source_addr;
-        uint64_t target_addr;
-        uint64_t length;
-    };
-    std::vector<Req> reqs;
+    std::vector<RdmaReq> reqs;
     reqs.reserve(entries.size());
     for (const auto &entry : entries) {
         assert(entry.opcode == OPCODE_READ);
         reqs.emplace_back(reinterpret_cast<uint64_t>(entry.source),
                           entry.target_offset, entry.length);
     }
-    size_t reqs_nbytes = sizeof(Req) * reqs.size();
+    size_t reqs_nbytes = sizeof(RdmaReq) * reqs.size();
 
     nbytes = writeFully(fd, reqs.data(), reqs_nbytes);
     if (nbytes != static_cast<ssize_t>(reqs_nbytes))

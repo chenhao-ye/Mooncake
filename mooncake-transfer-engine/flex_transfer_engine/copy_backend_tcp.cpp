@@ -64,28 +64,28 @@ void TcpCopyBackend::cleanup() {
 }
 
 bool TcpCopyBackend::getNextChunk(size_t &task_idx, size_t &chunk_offset,
-                                  const std::vector<Task> &tasks,
-                                  int buffer_idx, ChunkIter &iter_out) {
+                                  std::vector<Task> &tasks, int buffer_idx,
+                                  ChunkIter &iter_out) {
     // iterate through tasks to find the next chunk
     while (task_idx < tasks.size()) {
-        const Task &task = tasks[task_idx];
+        Task &task = tasks[task_idx];
         if (chunk_offset >= task.length) {  // move to next task
             task_idx++;
             chunk_offset = 0;
             continue;
         }
 
-        RegionMgr::Region *region =
-            region_mgr_.getRegion(task.source_addr, task.length);
-        if (!region) {
-            std::cerr << "Source address 0x" << std::hex << task.source_addr
-                      << " not in registered copiable regions" << std::endl;
-            return false;
+        if (!task.region) {
+            task.region = region_mgr_.getRegion(task.source_addr, task.length);
+            if (!task.region) {
+                std::cerr << "Source address 0x" << std::hex << task.source_addr
+                          << " not in registered copiable regions" << std::endl;
+                throw std::runtime_error(
+                    "Source address not in registered copiable regions");
+            }
         }
 
-        iter_out.loc_id = region->loc_id;
-
-        // Calculate chunk parameters
+        iter_out.loc_id = task.region->loc_id;
         iter_out.source_addr =
             static_cast<char *>(task.source_addr) + chunk_offset;
         size_t remaining = task.length - chunk_offset;
@@ -95,9 +95,7 @@ bool TcpCopyBackend::getNextChunk(size_t &task_idx, size_t &chunk_offset,
         iter_out.length = remaining;  // No chunking for CPU-only builds
 #endif
         iter_out.buffer_idx = buffer_idx;
-
         chunk_offset += iter_out.length;
-
         return true;
     }
 

@@ -22,9 +22,10 @@ class TcpCopyBackend {
     struct Task {
         void *source_addr;
         size_t length;
+        Region *region;  // set during processing
 
         Task(void *source_addr, size_t length)
-            : source_addr(source_addr), length(length) {}
+            : source_addr(source_addr), length(length), region(nullptr) {}
     };
 
    public:
@@ -67,7 +68,7 @@ class TcpCopyBackend {
     // Helper function to get the next chunk from the task sequence
     // Advances task_idx and chunk_offset as chunks are consumed
     bool getNextChunk(size_t &task_idx, size_t &chunk_offset,
-                      const std::vector<Task> &tasks, int buffer_idx,
+                      std::vector<Task> &tasks, int buffer_idx,
                       ChunkIter &iter_out);
 
     FlexTransferEngine &engine_;

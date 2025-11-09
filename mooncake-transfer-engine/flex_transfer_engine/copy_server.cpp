@@ -398,13 +398,8 @@ int CopyServer::readSegmentName(int client_fd, std::string &segment_name) {
 // read RDMA requests from fd into tasks
 int CopyServer::readRdmaRequests(int client_fd, uint64_t &target_progress_addr,
                                  std::vector<RdmaCopyBackend::Task> &tasks) {
-    struct Header {
-        uint64_t progress_addr;
-        uint64_t num_reqs;
-    };
-
     ssize_t nbytes;
-    Header header;
+    RdmaHeader header;
 
     nbytes = readFully(client_fd, &header, sizeof(header));
     if (nbytes != sizeof(header)) {
@@ -419,13 +414,8 @@ int CopyServer::readRdmaRequests(int client_fd, uint64_t &target_progress_addr,
               << target_progress_addr << std::dec
               << ", num_reqs=" << header.num_reqs << std::endl;
 
-    struct Req {
-        uint64_t source_addr;
-        uint64_t target_addr;
-        uint64_t length;
-    };
-    std::vector<Req> reqs(header.num_reqs);
-    size_t reqs_nbytes = sizeof(Req) * header.num_reqs;
+    std::vector<RdmaReq> reqs(header.num_reqs);
+    size_t reqs_nbytes = sizeof(RdmaReq) * header.num_reqs;
 
     nbytes = readFully(client_fd, reqs.data(), reqs_nbytes);
     if (nbytes != static_cast<ssize_t>(reqs_nbytes)) {
@@ -449,20 +439,16 @@ int CopyServer::readRdmaRequests(int client_fd, uint64_t &target_progress_addr,
 // read TCP requests from fd into tasks
 int readTcpRequests(int client_fd, std::vector<TcpCopyBackend::Task> &tasks) {
     ssize_t nbytes;
-    uint64_t num_reqs;
-    nbytes = readFully(client_fd, &num_reqs, sizeof(num_reqs));
-    if (nbytes != sizeof(num_reqs)) {
+    TcpHeader header;
+    nbytes = readFully(client_fd, &header, sizeof(header));
+    if (nbytes != sizeof(header)) {
         std::cerr << "Failed to read number of TCP requests" << std::endl;
         return -1;
     }
-    tasks.reserve(num_reqs);
+    tasks.reserve(header.num_reqs);
 
-    struct Req {
-        uint64_t target_addr;
-        uint64_t length;
-    };
-    std::vector<Req> reqs(num_reqs);
-    size_t reqs_nbytes = sizeof(Req) * num_reqs;
+    std::vector<TcpReq> reqs(header.num_reqs);
+    size_t reqs_nbytes = sizeof(TcpReq) * header.num_reqs;
 
     nbytes = readFully(client_fd, reqs.data(), reqs_nbytes);
     if (nbytes != static_cast<ssize_t>(reqs_nbytes)) {

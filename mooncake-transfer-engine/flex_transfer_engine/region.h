@@ -15,17 +15,15 @@ struct LocId {
 
 static_assert(sizeof(LocId) == sizeof(uint64_t), "LocId size must be 8 bytes");
 
+struct Region {
+    void *addr;
+    size_t length;
+    LocId loc_id;
+};
+
+// Not thread-safe; caller must hold regions_mutex_
 class RegionMgr {
-    // Not thread-safe; caller must hold regions_mutex_
-
    public:
-    struct Region {
-        void *addr;
-        size_t length;
-        LocId loc_id;
-    };
-
-    // Require regions_mutex_ to be held before calling
     LocId getLocId(const std::string &location) {
         // extract CUDA device from location string (e.g., "cuda:0" -> 0)
         int32_t cuda_device = -1;  // -1 for CPU
@@ -72,9 +70,6 @@ class RegionMgr {
    private:
     // Copiable memory regions (addr -> region info)
     // Tracks regions that can be read via copy transfer.
-    // When enable_copy_ is true, these are NOT actually RDMA-registered,
-    // only tracked for copy-based transfers.
-    // When enable_copy_ is false, these ARE RDMA-registered.
     std::unordered_map<void *, Region> regions_;
 
     // Location string storage (LocId -> location string)

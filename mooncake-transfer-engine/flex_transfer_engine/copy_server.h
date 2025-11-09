@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "copy_backend_rdma.h"
+#include "copy_backend_tcp.h"
 #include "copy_common.h"
 #include "region.h"
 #include "transfer_engine_c.h"
@@ -22,6 +23,7 @@ class CopyServer {
         : engine_(engine),
           region_mgr_(),
           rdma_copy_backend_(engine, region_mgr_),
+          tcp_copy_backend_(engine, region_mgr_),
           worker_running_(false),
           listener_fd_(-1),
           stop_event_fd_(-1),
@@ -56,7 +58,7 @@ class CopyServer {
     RegionMgr region_mgr_;
 
     RDMACopyBackend rdma_copy_backend_;
-    // TODO: TCPCopyBackend tcp_copy_backend_
+    TCPCopyBackend tcp_copy_backend_;
 
     // Active client connections
     // Server is single-threaded, no mutex needed
@@ -72,11 +74,16 @@ class CopyServer {
     void workerThread();
 
     int processRDMARequest(int client_fd);
+    int processTCPRequest(int client_fd);
 
-    // read segment name from fd and write into segment_name
+    // read segment name from fd into segment_name
     int readSegmentName(int client_fd, std::string &segment_name);
 
-    // read requests from fd and write into tasks
-    int readTasks(int client_fd, uint64_t &target_progress_addr,
-                  std::vector<RDMACopyBackend::Task> &tasks);
+    // read RDMA requests from fd into tasks
+    int readRDMARequests(int client_fd, uint64_t &target_progress_addr,
+                         std::vector<RDMACopyBackend::Task> &tasks);
+
+    // read TCP requests from fd into tasks
+    int readTCPRequests(int client_fd,
+                        std::vector<TCPCopyBackend::Task> &tasks);
 };

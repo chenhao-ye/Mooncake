@@ -67,6 +67,10 @@ class CopyClient {
                             RDMACopyCtrlBlock *ctrl_block);
 
    private:
+    void writeSegmentName(int fd);
+    void writeRDMARequests(int fd, std::vector<transfer_request_t> &entries,
+                           RDMACopyCtrlBlock *ctrl_block);
+
     /**
      * Connect to a remote CopyServer.
      * @param server_url URL in format "ip:port"

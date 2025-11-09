@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <cstddef>
 #include <cstring>
 #include <iostream>
 
@@ -54,15 +55,19 @@ void CopyClient::submitRDMARequests(std::vector<transfer_request_t> &entries,
                                     RDMACopyCtrlBlock *ctrl_block) {
     assert(ctrl_block);
 
-    // Send protocol to remote CopyServer:
-    // 1. Segment name length (4 bytes)
-    // 2. Segment name (variable length)
-    // 3. Progress address (8 bytes)
-    // 4. Number of requests (8 bytes)
-    // 5. For each request: source_addr (8 bytes), target_addr (8 bytes), length
-    // (8 bytes)
+    writeSegmentName(conn->fd);
+    writeRDMARequests(conn->fd, entries, ctrl_block);
 
-    int fd = conn->fd;
+    // The remote CopyServer will now process the requests asynchronously
+    // and update the progress counter via RDMA writes. The caller should
+    // poll the progress to check completion.
+
+    std::cerr << "Submitted " << entries.size() << " requests to CopyServer at "
+              << conn->server_url << std::endl;
+    conn->has_pending = true;
+}
+
+void CopyClient::writeSegmentName(int fd) {
     ssize_t nbytes;
 
     // Send segment name length
@@ -77,50 +82,43 @@ void CopyClient::submitRDMARequests(std::vector<transfer_request_t> &entries,
     nbytes = writeFully(fd, local_segment_name_.c_str(), segment_name_len);
     if (nbytes != segment_name_len)
         throw std::runtime_error("Failed to send segment name to CopyServer");
+}
 
+void CopyClient::writeRDMARequests(int fd,
+                                   std::vector<transfer_request_t> &entries,
+                                   RDMACopyCtrlBlock *ctrl_block) {
     // Send batch info
-    struct BatchInfo {
+    struct Header {
         uint64_t progress_addr;
-        uint64_t num_requests;
+        uint64_t num_reqs;
     };
 
-    BatchInfo batch_info;
-    batch_info.progress_addr =
-        reinterpret_cast<uint64_t>(&ctrl_block->progress_counter);
-    batch_info.num_requests = entries.size();
+    ssize_t nbytes;
+    Header header{.progress_addr =
+                      reinterpret_cast<uint64_t>(&ctrl_block->progress_counter),
+                  .num_reqs = entries.size()};
 
-    nbytes = writeFully(fd, &batch_info, sizeof(batch_info));
-    if (nbytes != sizeof(batch_info))
+    nbytes = writeFully(fd, &header, sizeof(header));
+    if (nbytes != sizeof(header))
         throw std::runtime_error("Failed to send batch info to CopyServer");
 
-    // Send request details (source on remote CopyServer, target on local)
+    struct Req {
+        uint64_t source_addr;
+        uint64_t target_addr;
+        uint64_t length;
+    };
+    std::vector<Req> reqs;
+    reqs.reserve(entries.size());
     for (const auto &entry : entries) {
         assert(entry.opcode == OPCODE_READ);
-        struct RequestInfo {
-            uint64_t source_addr;
-            uint64_t target_addr;
-            uint64_t length;
-        };
-
-        RequestInfo req_info;
-        req_info.source_addr = reinterpret_cast<uint64_t>(entry.source);
-        req_info.target_addr = entry.target_offset;
-        req_info.length = entry.length;
-
-        nbytes = writeFully(fd, &req_info, sizeof(req_info));
-        if (nbytes != sizeof(req_info)) {
-            throw std::runtime_error(
-                "Failed to send request info to CopyServer");
-        }
+        reqs.emplace_back(reinterpret_cast<uint64_t>(entry.source),
+                          entry.target_offset, entry.length);
     }
+    size_t reqs_nbytes = sizeof(Req) * reqs.size();
 
-    // The remote CopyServer will now process the requests asynchronously
-    // and update the progress counter via RDMA writes. The caller should
-    // poll the progress to check completion.
-
-    std::cerr << "Submitted " << entries.size() << " requests to CopyServer at "
-              << conn->server_url << std::endl;
-    conn->has_pending = true;
+    nbytes = writeFully(fd, reqs.data(), reqs_nbytes);
+    if (nbytes != static_cast<ssize_t>(reqs_nbytes))
+        throw std::runtime_error("Failed to send request info to CopyServer");
 }
 
 int CopyClient::connectToCopyServer(const std::string &server_url) {

@@ -297,7 +297,7 @@ int CopyServer::processRDMARequest(int client_fd) {
     rc = readSegmentName(client_fd, segment_name);
     if (rc) goto cleanup;
 
-    rc = readTasks(client_fd, target_progress_addr, tasks);
+    rc = readRDMARequests(client_fd, target_progress_addr, tasks);
     if (rc) goto cleanup;
 
     target_segment_id = engine_.getSegmentId(segment_name);
@@ -336,7 +336,7 @@ cleanup:
     return success ? 0 : -1;
 }
 
-// read segment name from fd and write into segment_name
+// read segment name from fd into segment_name
 int CopyServer::readSegmentName(int client_fd, std::string &segment_name) {
     uint32_t segment_name_len;
     // read segment name length
@@ -365,44 +365,84 @@ int CopyServer::readSegmentName(int client_fd, std::string &segment_name) {
     return 0;
 }
 
-// read requests from fd and write into tasks
-int CopyServer::readTasks(int client_fd, uint64_t &target_progress_addr,
-                          std::vector<RDMACopyBackend::Task> &tasks) {
-    struct BatchInfo {
+// read RDMA requests from fd into tasks
+int CopyServer::readRDMARequests(int client_fd, uint64_t &target_progress_addr,
+                                 std::vector<RDMACopyBackend::Task> &tasks) {
+    struct Header {
         uint64_t progress_addr;
-        uint64_t num_requests;
+        uint64_t num_reqs;
     };
 
-    BatchInfo batch_info;
+    ssize_t nbytes;
+    Header header;
 
-    // read batch info
-    if (readFully(client_fd, &batch_info, sizeof(batch_info)) !=
-        sizeof(batch_info)) {
-        std::cerr << "Failed to read batch info" << std::endl;
+    nbytes = readFully(client_fd, &header, sizeof(header));
+    if (nbytes != sizeof(header)) {
+        std::cerr << "Failed to read RDMA request header" << std::endl;
         return -1;
     }
 
-    target_progress_addr = batch_info.progress_addr;
+    target_progress_addr = header.progress_addr;
+    tasks.reserve(header.num_reqs);
 
     std::cerr << "Received transfer request: progress_addr=0x" << std::hex
               << target_progress_addr << std::dec
-              << ", num_requests=" << batch_info.num_requests << std::endl;
+              << ", num_reqs=" << header.num_reqs << std::endl;
 
-    for (uint64_t i = 0; i < batch_info.num_requests; ++i) {
-        struct RequestInfo {
-            uint64_t source_addr;
-            uint64_t target_addr;
-            uint64_t length;
-        };
+    struct Req {
+        uint64_t source_addr;
+        uint64_t target_addr;
+        uint64_t length;
+    };
+    std::vector<Req> reqs(header.num_reqs);
+    size_t reqs_nbytes = sizeof(Req) * header.num_reqs;
 
-        RequestInfo req_info;
-        if (readFully(client_fd, &req_info, sizeof(req_info)) !=
-            sizeof(req_info)) {
-            std::cerr << "Failed to read request info" << std::endl;
-            return -1;
-        }
-        tasks.emplace_back(reinterpret_cast<void *>(req_info.source_addr),
-                           req_info.target_addr, req_info.length);
+    nbytes = readFully(client_fd, reqs.data(), reqs_nbytes);
+    if (nbytes != static_cast<ssize_t>(reqs_nbytes)) {
+        std::cerr << "Failed to read requests" << std::endl;
+        return -1;
+    }
+
+    // Here we have a request-task conversion:
+    // For request (from client), source_addr is a client address; target_addr
+    // is a server address. For task (on server), source_addr is a server
+    // address (where to copy data from), and target_addr is a client address
+    // (where to write data to). There source_addr and target_addr should be
+    // swapped when converting from request to task.
+    for (const auto &req : reqs) {
+        tasks.emplace_back(reinterpret_cast<void *>(req.target_addr),
+                           req.source_addr, req.length);
     }
     return 0;
 }
+
+// read TCP requests from fd into tasks
+int readTCPRequests(int client_fd, std::vector<TCPCopyBackend::Task> &tasks) {
+    ssize_t nbytes;
+    uint64_t num_reqs;
+    nbytes = readFully(client_fd, &num_reqs, sizeof(num_reqs));
+    if (nbytes != sizeof(num_reqs)) {
+        std::cerr << "Failed to read number of TCP requests" << std::endl;
+        return -1;
+    }
+    tasks.reserve(num_reqs);
+
+    struct Req {
+        uint64_t target_addr;
+        uint64_t length;
+    };
+    std::vector<Req> reqs(num_reqs);
+    size_t reqs_nbytes = sizeof(Req) * num_reqs;
+
+    nbytes = readFully(client_fd, reqs.data(), reqs_nbytes);
+    if (nbytes != static_cast<ssize_t>(reqs_nbytes)) {
+        std::cerr << "Failed to read TCP requests" << std::endl;
+        return -1;
+    }
+
+    for (const auto &req : reqs)
+        tasks.emplace_back(reinterpret_cast<void *>(req.target_addr),
+                           req.length);
+
+    return 0;
+};

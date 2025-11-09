@@ -75,17 +75,16 @@ bool TcpCopyBackend::getNextChunk(TaskIter &task_iter, std::vector<Task> &tasks,
         }
 
         if (!task.region) {
-            task.region = region_mgr_.getRegion(task.source_addr, task.length);
+            task.region = region_mgr_.getRegion(task.addr, task.length);
             if (!task.region) {
-                std::cerr << "Source address 0x" << std::hex << task.source_addr
+                std::cerr << "Source address 0x" << std::hex << task.addr
                           << " not in registered copiable regions" << std::endl;
                 throw std::runtime_error(
                     "Source address not in registered copiable regions");
             }
         }
 
-        iter_out.source_addr =
-            static_cast<char *>(task.source_addr) + task_iter.chunk_offset;
+        iter_out.addr = static_cast<char *>(task.addr) + task_iter.chunk_offset;
         size_t remaining = task.length - task_iter.chunk_offset;
         iter_out.loc_id = task.region->loc_id;
 
@@ -109,6 +108,49 @@ bool TcpCopyBackend::getNextChunk(TaskIter &task_iter, std::vector<Task> &tasks,
 
     return false;  // no more chunks available
 }
+
+#ifdef USE_CUDA
+void TcpCopyBackend::ensureCudaDevice(int target_device, int &curr_device) {
+    if (curr_device != target_device) {
+        cudaError_t err = cudaSetDevice(target_device);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaSetDevice failed: ") +
+                                     cudaGetErrorString(err));
+        }
+        curr_device = target_device;
+    }
+}
+
+void TcpCopyBackend::startAsyncCopy(int buffer_idx, const ChunkIter *chunk_iter,
+                                    cudaMemcpyKind direction) {
+    void *dst, *src;
+
+    if (direction == cudaMemcpyDeviceToHost) {
+        // GPU -> buffer (for send/processRequest)
+        dst = buffer_pair_->buffers[buffer_idx];
+        src = chunk_iter->addr;
+    } else {  // cudaMemcpyHostToDevice
+        // buffer -> GPU (for recv/processResponse)
+        dst = chunk_iter->addr;
+        src = buffer_pair_->buffers[buffer_idx];
+    }
+
+    cudaError_t err = cudaMemcpyAsync(dst, src, chunk_iter->length, direction,
+                                      buffer_pair_->streams[buffer_idx]);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
+                                 cudaGetErrorString(err));
+    }
+}
+
+void TcpCopyBackend::waitForCudaCopy(cudaStream_t stream) {
+    cudaError_t err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaStreamSynchronize failed: ") +
+                                 cudaGetErrorString(err));
+    }
+}
+#endif
 
 int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
     if (tasks.empty()) return 0;
@@ -140,22 +182,8 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 
     if (curr->loc_id.isCuda()) {
 #ifdef USE_CUDA
-        if (curr_device != curr->loc_id.cuda_device) {
-            cudaError_t err = cudaSetDevice(curr->loc_id.cuda_device);
-            if (err != cudaSuccess) {
-                throw std::runtime_error(std::string("cudaSetDevice failed: ") +
-                                         cudaGetErrorString(err));
-            }
-            curr_device = curr->loc_id.cuda_device;
-        }
-
-        cudaError_t err = cudaMemcpyAsync(
-            buffer_pair_->buffers[buffer_idx], curr->source_addr, curr->length,
-            cudaMemcpyDeviceToHost, buffer_pair_->streams[buffer_idx]);
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
-                                     cudaGetErrorString(err));
-        }
+        ensureCudaDevice(curr->loc_id.cuda_device, curr_device);
+        startAsyncCopy(buffer_idx, curr, cudaMemcpyDeviceToHost);
 #endif  // skip else check because getNextChunk has already checked
     }
 
@@ -163,22 +191,8 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
     bool has_next = getNextChunk(task_iter, tasks, buffer_idx, *next);
 #ifdef USE_CUDA
     if (has_next && next->loc_id.isCuda()) {
-        if (curr_device != next->loc_id.cuda_device) {
-            cudaError_t err = cudaSetDevice(next->loc_id.cuda_device);
-            if (err != cudaSuccess) {
-                throw std::runtime_error(std::string("cudaSetDevice failed: ") +
-                                         cudaGetErrorString(err));
-            }
-            curr_device = next->loc_id.cuda_device;
-        }
-
-        cudaError_t err = cudaMemcpyAsync(
-            buffer_pair_->buffers[buffer_idx], next->source_addr, next->length,
-            cudaMemcpyDeviceToHost, buffer_pair_->streams[buffer_idx]);
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
-                                     cudaGetErrorString(err));
-        }
+        ensureCudaDevice(next->loc_id.cuda_device, curr_device);
+        startAsyncCopy(buffer_idx, next, cudaMemcpyDeviceToHost);
     }
 #endif  // skip else check because getNextChunk has already checked
 
@@ -191,18 +205,12 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 #ifdef USE_CUDA
         // Wait for curr chunk to complete copy; no need waiting for CPU memory
         if (curr->loc_id.isCuda()) {
-            cudaError_t err =
-                cudaStreamSynchronize(buffer_pair_->streams[curr->buffer_idx]);
-            if (err != cudaSuccess) {
-                throw std::runtime_error(
-                    std::string("cudaStreamSynchronize failed: ") +
-                    cudaGetErrorString(err));
-            }
+            waitForCudaCopy(buffer_pair_->streams[curr->buffer_idx]);
         }
 #endif
 
         // Send current chunk
-        void *send_addr = curr->source_addr;
+        void *send_addr = curr->addr;
 #ifdef USE_CUDA
         if (curr->loc_id.isCuda()) {
             send_addr = buffer_pair_->buffers[curr->buffer_idx];
@@ -220,46 +228,18 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
         has_next = getNextChunk(task_iter, tasks, buffer_idx, *next);
 #ifdef USE_CUDA
         if (has_next && next->loc_id.isCuda()) {
-            if (curr_device != next->loc_id.cuda_device) {
-                cudaError_t err = cudaSetDevice(next->loc_id.cuda_device);
-                if (err != cudaSuccess) {
-                    throw std::runtime_error(
-                        std::string("cudaSetDevice failed: ") +
-                        cudaGetErrorString(err));
-                }
-                curr_device = next->loc_id.cuda_device;
-            }
-
-            cudaError_t err = cudaMemcpyAsync(
-                buffer_pair_->buffers[buffer_idx], next->source_addr,
-                next->length, cudaMemcpyDeviceToHost,
-                buffer_pair_->streams[buffer_idx]);
-            if (err != cudaSuccess) {
-                throw std::runtime_error(
-                    std::string("cudaMemcpyAsync failed: ") +
-                    cudaGetErrorString(err));
-            }
+            ensureCudaDevice(next->loc_id.cuda_device, curr_device);
+            startAsyncCopy(buffer_idx, next, cudaMemcpyDeviceToHost);
         }
 #endif
     }
 
     // ===== Phase 3: Drain the last chunk =====
+    // Handle the last chunk
+    void *send_addr = curr->addr;
 #ifdef USE_CUDA
     if (curr->loc_id.isCuda()) {
-        cudaError_t err =
-            cudaStreamSynchronize(buffer_pair_->streams[curr->buffer_idx]);
-        if (err != cudaSuccess) {
-            throw std::runtime_error(
-                std::string("cudaStreamSynchronize failed: ") +
-                cudaGetErrorString(err));
-        }
-    }
-#endif
-
-    // Send last chunk
-    void *send_addr = curr->source_addr;
-#ifdef USE_CUDA
-    if (curr->loc_id.isCuda()) {
+        waitForCudaCopy(buffer_pair_->streams[curr->buffer_idx]);
         send_addr = buffer_pair_->buffers[curr->buffer_idx];
     }
 #endif
@@ -270,6 +250,103 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
     }
 
     std::cerr << "Completed TCP transfer request: sent " << tasks.size()
+              << " tasks" << std::endl;
+    return 0;
+}
+
+int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks) {
+    if (tasks.empty()) return 0;
+
+#ifdef USE_CUDA
+    // Initialize buffer pair on first use (only needed for CUDA)
+    if (!buffer_pair_) buffer_pair_ = new BufferPair();
+#endif
+
+    // Iteration state for chunk traversal
+    TaskIter task_iter;
+
+    // Use two ChunkIter objects and swap pointers to avoid copying
+    ChunkIter chunk_iters[2];
+    ChunkIter *prev = &chunk_iters[0];
+    ChunkIter *curr = &chunk_iters[1];
+    int buffer_idx = 0;
+
+#ifdef USE_CUDA
+    // Track prev CUDA device to avoid redundant cudaSetDevice calls
+    int curr_device = -1;
+#endif
+
+    // ===== Phase 1: Prime the pipeline =====
+    // Receive first chunks from TCP and start async GPU copy
+
+    if (!getNextChunk(task_iter, tasks, buffer_idx, *prev))
+        throw std::runtime_error("Failed to get first chunk");
+
+    // Receive first chunk into buffer or direct to CPU memory
+    void *recv_addr = prev->addr;
+#ifdef USE_CUDA
+    if (prev->loc_id.isCuda()) {
+        recv_addr = buffer_pair_->buffers[buffer_idx];
+    }
+#endif
+    ssize_t nbytes = readFully(server_fd, recv_addr, prev->length);
+    if (nbytes != static_cast<ssize_t>(prev->length)) return -1;
+
+#ifdef USE_CUDA
+    if (prev->loc_id.isCuda()) {
+        ensureCudaDevice(prev->loc_id.cuda_device, curr_device);
+        startAsyncCopy(buffer_idx, prev, cudaMemcpyHostToDevice);
+    }
+#endif
+
+    // ===== Phase 2: Main pipeline loop =====
+    // Repeat uniform pattern:
+    // - receive curr chunk from TCP
+    // - start async GPU copy for curr
+    // - wait for prev chunk to finish GPU copy
+    // - swap prev and curr
+    buffer_idx = 1 - buffer_idx;  // toggle
+    while (getNextChunk(task_iter, tasks, buffer_idx, *curr)) {
+        recv_addr = curr->addr;
+#ifdef USE_CUDA
+        if (curr->loc_id.isCuda()) {
+            recv_addr = buffer_pair_->buffers[buffer_idx];
+        }
+#endif
+        nbytes = readFully(server_fd, recv_addr, curr->length);
+        if (nbytes != static_cast<ssize_t>(curr->length)) return -1;
+
+#ifdef USE_CUDA
+        if (curr->loc_id.isCuda()) {
+            ensureCudaDevice(curr->loc_id.cuda_device, curr_device);
+            startAsyncCopy(buffer_idx, curr, cudaMemcpyHostToDevice);
+        }
+#endif
+
+        // Wait for prev chunk to complete GPU copy
+#ifdef USE_CUDA
+        if (prev->loc_id.isCuda()) {
+            waitForCudaCopy(buffer_pair_->streams[prev->buffer_idx]);
+        }
+#endif
+
+        // Advance pipeline: swap prev and curr
+        ChunkIter *temp = prev;
+        prev = curr;
+        curr = temp;
+
+        buffer_idx = 1 - buffer_idx;  // toggle
+        // invariant: curr is done while prev may have pending copy
+    }
+
+    // ===== Phase 3: Drain the last chunk =====
+#ifdef USE_CUDA
+    if (prev->loc_id.isCuda()) {
+        waitForCudaCopy(buffer_pair_->streams[prev->buffer_idx]);
+    }
+#endif
+
+    std::cerr << "Completed TCP transfer response: received " << tasks.size()
               << " tasks" << std::endl;
     return 0;
 }

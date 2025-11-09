@@ -20,12 +20,12 @@ class FlexTransferEngine;
 class TcpCopyBackend {
    public:
     struct Task {
-        void *source_addr;
+        void *addr;
         size_t length;
         Region *region;  // set during processing
 
-        Task(void *source_addr, size_t length)
-            : source_addr(source_addr), length(length), region(nullptr) {}
+        Task(void *addr, size_t length)
+            : addr(addr), length(length), region(nullptr) {}
     };
 
    public:
@@ -33,6 +33,9 @@ class TcpCopyBackend {
     ~TcpCopyBackend() { cleanup(); }
 
     int processRequest(int client_fd, std::vector<Task> &tasks);
+
+    // for CopyClient to process TCP responses from processRequest
+    int processResponse(int server_fd, std::vector<Task> &tasks);
 
     void cleanup();
 
@@ -59,7 +62,7 @@ class TcpCopyBackend {
 
     // Helper structure to represent a single chunk within the pipeline
     struct ChunkIter {
-        void *source_addr{nullptr};
+        void *addr{nullptr};
         size_t length{0};
         LocId loc_id{0, -1};
         int buffer_idx{0};
@@ -74,6 +77,18 @@ class TcpCopyBackend {
     // Advances TaskIter as chunks are consumed
     bool getNextChunk(TaskIter &task_iter, std::vector<Task> &tasks,
                       int buffer_idx, ChunkIter &iter_out);
+
+#ifdef USE_CUDA
+    // Some handy helpers
+    // set CUDA device if needed (avoids redundant calls)
+    void ensureCudaDevice(int target_device, int &curr_device);
+    // start async memory copy (GPU <-> buffer) and handle errors
+    void startAsyncCopy(int buffer_idx, const ChunkIter *chunk,
+                        cudaMemcpyKind direction);
+    // wait for CUDA stream synchronization
+    void waitForCudaCopy(cudaStream_t stream);
+
+#endif
 
     FlexTransferEngine &engine_;
     RegionMgr &region_mgr_;

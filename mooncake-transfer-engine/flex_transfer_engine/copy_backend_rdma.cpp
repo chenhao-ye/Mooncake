@@ -315,9 +315,9 @@ void RdmaCopyBackend::copyMemory(void *dst, const void *src, size_t size,
                                  BufferPair &buffer_pair) {
     if (buffer_pair.is_cuda) {
 #ifdef USE_CUDA
-        // Async copy to GPU
-        cudaError_t err = cudaMemcpyAsync(dst, src, size, cudaMemcpyDefault,
-                                          buffer_pair.cuda_stream);
+        // Async copy within CUDA memory
+        cudaError_t err = cudaMemcpyAsync(
+            dst, src, size, cudaMemcpyDeviceToDevice, buffer_pair.cuda_stream);
         if (err != cudaSuccess) {
             throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
                                      cudaGetErrorString(err));

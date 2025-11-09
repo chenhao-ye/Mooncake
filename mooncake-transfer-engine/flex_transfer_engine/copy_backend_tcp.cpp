@@ -96,8 +96,7 @@ int TcpCopyBackend::processTask(int client_fd, Task &task) {
         return -1;
     }
 
-    const std::string &location = region_mgr_.getLocation(region->loc_idx);
-    bool is_cuda = location.find("cuda:") == 0;
+    bool is_cuda = region->loc_id.cuda_device >= 0;
 
     if (!is_cuda) {
         // CPU memory: send directly
@@ -110,8 +109,8 @@ int TcpCopyBackend::processTask(int client_fd, Task &task) {
     }
 
     // CUDA memory: chunked transfer with double buffering
-    // Extract device ID and set device
-    int device_id = std::stoi(location.substr(5));
+    // Use CUDA device ID from loc_id
+    int device_id = region->loc_id.cuda_device;
     cudaError_t err = cudaSetDevice(device_id);
     if (err != cudaSuccess) {
         std::cerr << "Failed to set CUDA device " << device_id << ": "

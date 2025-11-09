@@ -38,9 +38,9 @@ int CopyServer::registerLocalMemory(void *addr, size_t length,
                                     const std::string &location) {
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
 
-    LocIdx loc_idx = region_mgr_.getLocIdx(location);
-    region_mgr_.addRegion(addr, length, loc_idx);
-    int rc = rdma_copy_backend_.prepareBufferPair(loc_idx, location, length);
+    LocId loc_id = region_mgr_.getLocId(location);
+    region_mgr_.addRegion(addr, length, loc_id);
+    int rc = rdma_copy_backend_.prepareBufferPair(loc_id, location, length);
     if (rc) goto err;
 
     std::cerr << "Registered memory at " << addr << " size " << length
@@ -61,17 +61,17 @@ int CopyServer::unregisterLocalMemory(void *addr) {
 int CopyServer::registerLocalMemoryBatch(
     std::vector<buffer_entry_t> &buffer_list, const std::string &location) {
     std::lock_guard<std::mutex> regions_lock(regions_mutex_);
-    LocIdx loc_idx = region_mgr_.getLocIdx(location);
+    LocId loc_id = region_mgr_.getLocId(location);
     size_t max_size = 0;
 
     for (const auto &entry : buffer_list) {
         if (entry.length > max_size) max_size = entry.length;
-        region_mgr_.addRegion(entry.addr, entry.length, loc_idx);
+        region_mgr_.addRegion(entry.addr, entry.length, loc_id);
     }
     std::cerr << "Registered " << buffer_list.size() << " buffers for location "
               << location << ", max size " << max_size << std::endl;
 
-    int rc = rdma_copy_backend_.prepareBufferPair(loc_idx, location, max_size);
+    int rc = rdma_copy_backend_.prepareBufferPair(loc_id, location, max_size);
     if (rc) goto err;
 
     return 0;

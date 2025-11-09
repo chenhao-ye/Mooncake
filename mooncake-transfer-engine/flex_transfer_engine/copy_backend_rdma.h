@@ -99,7 +99,7 @@ class RdmaCopyBackend {
 
     // Ensure that a buffer pair is ready for the given location with at least
     // the given length
-    int prepareBufferPair(LocIdx loc_idx, const std::string &location,
+    int prepareBufferPair(LocId loc_id, const std::string &location,
                           size_t length);
 
     // Process RDMA transfer requests
@@ -114,10 +114,10 @@ class RdmaCopyBackend {
     // Require regions_mutex_ to be held before calling
     // When this function is called, there MUST be a buffer pair ready with the
     // proper length (which should have been set up upon registration)
-    BufferPair &getBufferPair(LocIdx loc_idx) { return *buffer_pool_[loc_idx]; }
+    BufferPair &getBufferPair(LocId loc_id) { return *buffer_pool_[loc_id.idx]; }
 
     // Require regions_mutex_ to be held before calling
-    BufferPair *allocBufferPair(LocIdx loc_idx, const std::string &location,
+    BufferPair *allocBufferPair(LocId loc_id, const std::string &location,
                                 size_t size);
     // Require regions_mutex_ to be held before calling
     void freeBufferPair(BufferPair *pair);
@@ -164,6 +164,6 @@ class RdmaCopyBackend {
     FlexTransferEngine &engine_;
     // Reference to RegionMgr for region lookups
     RegionMgr &region_mgr_;
-    // Buffer pool per location (LocIdx -> buffer pair)
+    // Buffer pool per location (LocId -> buffer pair)
     std::vector<BufferPair *> buffer_pool_;
 };

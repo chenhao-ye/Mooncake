@@ -6,7 +6,12 @@
 #include <unordered_map>
 #include <vector>
 
-using LocIdx = int32_t;  // <0 for invalid location
+struct LocId {
+    uint32_t idx;         // index into location_strings_
+    int32_t cuda_device;  // -1 for CPU
+};
+
+static_assert(sizeof(LocId) == sizeof(uint64_t), "LocId size must be 8 bytes");
 
 class RegionMgr {
     // Not thread-safe; caller must hold regions_mutex_
@@ -15,23 +20,29 @@ class RegionMgr {
     struct Region {
         void *addr;
         size_t length;
-        LocIdx loc_idx;
+        LocId loc_id;
     };
 
     // Require regions_mutex_ to be held before calling
-    LocIdx getLocIdx(const std::string &location) {
-        // Linear search to find existing location
-        for (size_t i = 0; i < location_strings_.size(); ++i) {
-            if (location_strings_[i] == location) return static_cast<LocIdx>(i);
+    LocId getLocId(const std::string &location) {
+        // extract CUDA device from location string (e.g., "cuda:0" -> 0)
+        int32_t cuda_device = -1;  // -1 for CPU
+        if (location.find("cuda:") == 0)
+            cuda_device = std::stoi(location.substr(5));
+
+        // search to find existing location
+        for (uint32_t i = 0; i < location_strings_.size(); ++i) {
+            if (location_strings_[i] == location)
+                return LocId{.idx = i, .cuda_device = cuda_device};
         }
-        // Not found, add new location
-        LocIdx new_idx = static_cast<LocIdx>(location_strings_.size());
+        // not found, add new location
+        uint32_t idx = static_cast<int32_t>(location_strings_.size());
         location_strings_.emplace_back(location);
-        return new_idx;
+        return LocId{.idx = idx, .cuda_device = cuda_device};
     }
 
-    void addRegion(void *addr, size_t length, LocIdx loc_idx) {
-        regions_[addr] = {addr, length, loc_idx};
+    void addRegion(void *addr, size_t length, LocId loc_id) {
+        regions_[addr] = {addr, length, loc_id};
     }
 
     int removeRegion(void *addr) {
@@ -56,11 +67,6 @@ class RegionMgr {
         return nullptr;
     }
 
-    // Require regions_mutex_ to be held before calling
-    const std::string &getLocation(LocIdx loc_idx) const {
-        return location_strings_[loc_idx];
-    }
-
    private:
     // Copiable memory regions (addr -> region info)
     // Tracks regions that can be read via copy transfer.
@@ -69,7 +75,7 @@ class RegionMgr {
     // When enable_copy_ is false, these ARE RDMA-registered.
     std::unordered_map<void *, Region> regions_;
 
-    // Location string storage (LocIdx -> location string)
+    // Location string storage (LocId -> location string)
     // Append-only; will never remove entries
     std::vector<std::string> location_strings_;
 };

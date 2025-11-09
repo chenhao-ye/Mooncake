@@ -11,18 +11,18 @@ void RdmaCopyBackend::cleanup() {
     buffer_pool_.clear();
 }
 
-int RdmaCopyBackend::prepareBufferPair(LocIdx loc_idx,
+int RdmaCopyBackend::prepareBufferPair(LocId loc_id,
                                        const std::string &location,
                                        size_t length) {
-    if (static_cast<size_t>(loc_idx) >= buffer_pool_.size()) {
-        buffer_pool_.resize(loc_idx + 1, nullptr);
+    if (static_cast<size_t>(loc_id.idx) >= buffer_pool_.size()) {
+        buffer_pool_.resize(loc_id.idx + 1, nullptr);
     }
     // Check if we have a buffer pair for this location
-    BufferPair *pair = buffer_pool_[loc_idx];
+    BufferPair *pair = buffer_pool_[loc_id.idx];
     if (!pair || pair->size < length) {
         freeBufferPair(pair);
-        pair = allocBufferPair(loc_idx, location, length);
-        buffer_pool_[loc_idx] = pair;
+        pair = allocBufferPair(loc_id, location, length);
+        buffer_pool_[loc_id.idx] = pair;
         if (!pair) return -1;
         std::cerr << "Allocated buffer pair of size " << length
                   << " for location " << location << std::endl;
@@ -150,7 +150,7 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     }
 
     // Get a buffer pair for this location
-    BufferPair &buffer_pair = getBufferPair(region->loc_idx);
+    BufferPair &buffer_pair = getBufferPair(region->loc_id);
     assert(buffer_pair.size >= task.length);
 
     int buffer_idx = buffer_pair.selectNextBuffer();
@@ -192,14 +192,14 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
 }
 
 RdmaCopyBackend::BufferPair *RdmaCopyBackend::allocBufferPair(
-    LocIdx loc_idx, const std::string &location, size_t size) {
-    bool is_cuda = location.find("cuda:") == 0;
+    LocId loc_id, const std::string &location, size_t size) {
+    bool is_cuda = loc_id.cuda_device >= 0;
     size_t total_size = 2 * size;  // allocate one contiguous buffer w/ 2*size
     char *buffer_base = nullptr;
     if (is_cuda) {
 #ifdef USE_CUDA
-        // Extract device ID from location string (e.g., "cuda:1" -> 1)
-        int device_id = std::stoi(location.substr(5));
+        // Use CUDA device ID from loc_id
+        int device_id = loc_id.cuda_device;
         cudaError_t err = cudaSetDevice(device_id);
         if (err != cudaSuccess) {
             throw std::runtime_error(std::string("Failed to set CUDA device ") +

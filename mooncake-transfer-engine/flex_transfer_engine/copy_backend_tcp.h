@@ -18,13 +18,14 @@ class TcpCopyBackend {
     struct Task {
         void *source_addr;
         size_t length;
+        // TODO: maybe other fields for tracking execution status
     };
 
    public:
     TcpCopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr)
         : engine_(engine), region_mgr_(region_mgr) {}
 
-    int processRequest(int client_fd);
+    int processRequest(int client_fd, std::vector<Task> &tasks);
 
    private:
     FlexTransferEngine &engine_;

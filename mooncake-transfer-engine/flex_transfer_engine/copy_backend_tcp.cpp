@@ -6,4 +6,6 @@
 
 #include "flex_transfer_engine.h"
 
-int TcpCopyBackend::processRequest(int client_fd) { return 0; }
+int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
+    return 0;
+}

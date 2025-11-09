@@ -172,7 +172,8 @@ void CopyServer::stopListener() {
         if (stop_event_fd_ >= 0) {
             [[maybe_unused]] ssize_t nbytes;
             uint64_t event_value = 1;
-            nbytes = write(stop_event_fd_, &event_value, sizeof(event_value));
+            nbytes =
+                writeFully(stop_event_fd_, &event_value, sizeof(event_value));
             assert(nbytes == sizeof(event_value));
         }
 
@@ -224,8 +225,8 @@ void CopyServer::workerThread() {
             if (ready_fd == stop_event_fd_) {
                 [[maybe_unused]] ssize_t nbytes;
                 uint64_t event_value;
-                nbytes =
-                    read(stop_event_fd_, &event_value, sizeof(event_value));
+                nbytes = readFully(stop_event_fd_, &event_value,
+                                   sizeof(event_value));
                 assert(nbytes == sizeof(event_value));
                 goto cleanup;  // Exit the worker thread loop
             }
@@ -261,8 +262,26 @@ void CopyServer::workerThread() {
                 continue;
             }
 
-            // Handle client data
-            int rc = processRdmaRequest(ready_fd);
+            // Handle client requests
+            int rc = 0;
+            CopyMode copy_mode;
+            ssize_t nbytes = readFully(ready_fd, &copy_mode, sizeof(copy_mode));
+            if (nbytes == sizeof(copy_mode)) {
+                if (copy_mode == CopyMode::RDMA) {
+                    rc = processRdmaRequest(ready_fd);
+                } else if (copy_mode == CopyMode::TCP) {
+                    rc = processTcpRequest(ready_fd);
+                } else {
+                    std::cerr << "Invalid CopyMode value: "
+                              << static_cast<uint32_t>(copy_mode) << std::endl;
+                    rc = -1;
+                }
+            } else {
+                std::cerr << "Failed to read CopyMode from client fd="
+                          << ready_fd << std::endl;
+                rc = -1;
+            }
+
             if (rc != 0) {
                 // Error occurred or client disconnected, close and remove
                 std::cerr << "Closing client connection fd=" << ready_fd
@@ -334,6 +353,17 @@ cleanup:
 
     // Return 0 if all tasks completed successfully, -1 otherwise
     return success ? 0 : -1;
+}
+
+int CopyServer::processTcpRequest(int client_fd) {
+    int rc;
+    std::vector<TcpCopyBackend::Task> tasks;
+
+    rc = readTcpRequests(client_fd, tasks);
+    if (rc) return -1;
+
+    std::lock_guard<std::mutex> regions_lock(regions_mutex_);
+    return tcp_copy_backend_.processRequest(client_fd, tasks);
 }
 
 // read segment name from fd into segment_name

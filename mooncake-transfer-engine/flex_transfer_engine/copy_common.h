@@ -10,7 +10,7 @@
 enum class CopyMode : uint32_t { RDMA, TCP };
 
 /**
- * Used by both CopyClient and CopyServer. Must be register with remote_atomic.
+ * Used by both CopyClient and CopyServer. Must register with remote_atomic.
  */
 struct RdmaCopyCtrlBlock {
     volatile std::atomic_int64_t progress_counter = 0;

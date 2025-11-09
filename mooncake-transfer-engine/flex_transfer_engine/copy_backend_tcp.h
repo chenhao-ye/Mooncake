@@ -20,18 +20,17 @@ class FlexTransferEngine;
 class TcpCopyBackend {
    private:
 #ifdef USE_CUDA
-    // Fixed buffer size for chunked transfers (only needed for CUDA)
-    constexpr size_t kBufferSize = 2 * 1024 * 1024;  // 2 MB
 
     struct BufferPair {
+        // Fixed buffer size for chunked transfers (only needed for CUDA)
+        static constexpr size_t kBufferSize = 2 * 1024 * 1024;  // 2 MB
+
         // buffers[0] and buffers[1] are separate pinned host memory buffers
         char *buffers[2];
-        size_t size;  // Size of each buffer (kBufferSize)
-
         // Each buffer has its own CUDA stream
         cudaStream_t streams[2];
 
-        BufferPair(size_t size);
+        BufferPair();
         ~BufferPair();
 
         BufferPair(const BufferPair &) = delete;

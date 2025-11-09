@@ -8,48 +8,29 @@
 #include "util.h"
 
 #ifdef USE_CUDA
-TcpCopyBackend::BufferPair::BufferPair(size_t size)
-    : buffers{nullptr, nullptr}, size(size) {
-    streams[0] = nullptr;
-    streams[1] = nullptr;
+TcpCopyBackend::BufferPair::BufferPair()
+    : buffers{nullptr, nullptr}, streams{nullptr, nullptr} {
+    cudaError_t err;
 
-    // Allocate pinned host memory for both buffers
-    cudaError_t err = cudaMallocHost(&buffers[0], size);
-    if (err != cudaSuccess) {
-        throw std::runtime_error(
-            std::string(
-                "Failed to allocate pinned host memory for buffer 0: ") +
-            cudaGetErrorString(err));
-    }
+    err = cudaMallocHost(&buffers[0], kBufferSize);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMallocHost(&buffers[1], kBufferSize);
+    if (err != cudaSuccess) goto cleanup;
 
-    err = cudaMallocHost(&buffers[1], size);
-    if (err != cudaSuccess) {
-        cudaFreeHost(buffers[0]);
-        throw std::runtime_error(
-            std::string(
-                "Failed to allocate pinned host memory for buffer 1: ") +
-            cudaGetErrorString(err));
-    }
-
-    // Create CUDA streams
     err = cudaStreamCreate(&streams[0]);
-    if (err != cudaSuccess) {
-        cudaFreeHost(buffers[0]);
-        cudaFreeHost(buffers[1]);
-        throw std::runtime_error(
-            std::string("Failed to create CUDA stream 0: ") +
-            cudaGetErrorString(err));
-    }
-
+    if (err != cudaSuccess) goto cleanup;
     err = cudaStreamCreate(&streams[1]);
-    if (err != cudaSuccess) {
-        cudaStreamDestroy(streams[0]);
-        cudaFreeHost(buffers[0]);
-        cudaFreeHost(buffers[1]);
-        throw std::runtime_error(
-            std::string("Failed to create CUDA stream 1: ") +
-            cudaGetErrorString(err));
-    }
+    if (err != cudaSuccess) goto cleanup;
+
+    return;
+
+cleanup:
+    if (streams[0]) cudaStreamDestroy(streams[0]);
+    if (streams[1]) cudaStreamDestroy(streams[1]);
+    if (buffers[0]) cudaFreeHost(buffers[0]);
+    if (buffers[1]) cudaFreeHost(buffers[1]);
+    throw std::runtime_error(std::string("Failed to initialize BufferPair") +
+                             cudaGetErrorString(err));
 }
 
 TcpCopyBackend::BufferPair::~BufferPair() {
@@ -85,7 +66,7 @@ void TcpCopyBackend::cleanup() {
 int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 #ifdef USE_CUDA
     // Initialize buffer pair on first use (only needed for CUDA)
-    if (!buffer_pair_) buffer_pair_ = new BufferPair(kBufferSize);
+    if (!buffer_pair_) buffer_pair_ = new BufferPair();
 
 #endif
 
@@ -144,7 +125,7 @@ int TcpCopyBackend::processTask(int client_fd, Task &task) {
 
     // Process chunks
     while (remaining > 0) {
-        size_t chunk_size = std::min(remaining, kBufferSize);
+        size_t chunk_size = std::min(remaining, BufferPair::kBufferSize);
         cudaStream_t stream = buffer_pair_->streams[current_buffer];
         char *dst = buffer_pair_->buffers[current_buffer];
 

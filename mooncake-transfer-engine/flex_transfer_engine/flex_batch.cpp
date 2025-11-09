@@ -68,7 +68,7 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy,
     client_conn_ = copy_client.allocConnection(target);
     if (use_rdma) {
         ctrl_block_ = engine_->allocRDMACopyCtrlBlock();
-        copy_client.submitRDMATransfer(entries_, client_conn_, ctrl_block_);
+        copy_client.submitRDMARequests(entries_, client_conn_, ctrl_block_);
     } else {
         // TODO: add TCP support
     }

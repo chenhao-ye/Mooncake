@@ -11,7 +11,7 @@
 #include <cstring>
 #include <iostream>
 
-#include "copy_transfer.h"
+#include "copy_common.h"
 #include "flex_transfer_engine.h"
 #include "util.h"
 
@@ -49,7 +49,7 @@ void CopyClient::freeConnection(ClientConnection *conn) {
     delete conn;
 }
 
-void CopyClient::submitRDMATransfer(std::vector<transfer_request_t> &entries,
+void CopyClient::submitRDMARequests(std::vector<transfer_request_t> &entries,
                                     ClientConnection *conn,
                                     RDMACopyCtrlBlock *ctrl_block) {
     assert(ctrl_block);

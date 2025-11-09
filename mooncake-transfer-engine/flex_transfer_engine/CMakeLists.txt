@@ -2,6 +2,7 @@
 
 # Collect source files
 set(FLEX_TRANSFER_SOURCES
+    copy_backend_rdma.cpp
     copy_client.cpp
     copy_server.cpp
     flex_batch.cpp
@@ -34,13 +35,6 @@ install(TARGETS flex_transfer_engine
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
 )
-
-# # Install headers
-# install(FILES
-#     flex_transfer_engine.h
-#     flex_batch.h
-#     DESTINATION include/mooncake/flex_transfer_engine
-# )
 
 # Build example program
 if (BUILD_EXAMPLES)

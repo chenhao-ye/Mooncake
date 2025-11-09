@@ -11,13 +11,12 @@
 #include <vector>
 
 #include "copy_client.h"
+#include "copy_common.h"
 #include "copy_server.h"
-#include "copy_transfer.h"
 #include "flex_batch.h"
 #include "transfer_engine.h"
 #include "transfer_engine_c.h"
 
-// Forward declaration
 class FlexTransferEngine;
 
 /**

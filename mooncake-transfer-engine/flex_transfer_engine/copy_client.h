@@ -9,10 +9,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "copy_transfer.h"
+#include "copy_common.h"
 #include "transfer_engine_c.h"
 
-// Forward declarations
 class FlexTransferEngine;
 
 struct ClientConnection {
@@ -47,8 +46,8 @@ struct ClientConnection {
  */
 class CopyClient {
    public:
-    CopyClient(FlexTransferEngine &engine, const std::string local_segment_name)
-        : engine_(engine), local_segment_name_(local_segment_name) {}
+    CopyClient(const std::string local_segment_name)
+        : local_segment_name_(local_segment_name) {}
     ~CopyClient();
 
     ClientConnection *allocConnection(const std::string &server_url);
@@ -63,7 +62,7 @@ class CopyClient {
      * @param ctrl_block Control block for progress tracking
      * @return connection pointer
      */
-    void submitRDMATransfer(std::vector<transfer_request_t> &entries,
+    void submitRDMARequests(std::vector<transfer_request_t> &entries,
                             ClientConnection *conn,
                             RDMACopyCtrlBlock *ctrl_block);
 
@@ -74,8 +73,6 @@ class CopyClient {
      * @return File descriptor
      */
     int connectToCopyServer(const std::string &server_url);
-
-    FlexTransferEngine &engine_;
 
     // Let the remote CopyServer know where to submit RDMA write
     const std::string local_segment_name_;

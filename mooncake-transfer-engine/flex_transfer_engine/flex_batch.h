@@ -5,9 +5,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "copy_common.h"
 #include "transfer_engine_c.h"
 
-struct RDMACopyCtrlBlock;
 struct ClientConnection;
 class FlexTransferEngine;
 

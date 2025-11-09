@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include "copy_common.h"
 #include "transfer_engine_c.h"
 #include "util.h"
 
@@ -31,7 +32,7 @@ FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
     : enable_copy_(enable_copy),
       ctrl_block_location_(ctrl_block_location),
       copy_server_(*this),
-      copy_client_(*this, local_server_name) {
+      copy_client_(local_server_name) {
     if (ctrl_block_location.find("cuda:") == 0) {
         throw std::invalid_argument(
             "ctrl_block_location must not be on CUDA: " + ctrl_block_location);

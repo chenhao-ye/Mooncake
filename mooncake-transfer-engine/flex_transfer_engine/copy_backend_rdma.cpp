@@ -198,11 +198,20 @@ RDMACopyBackend::BufferPair *RDMACopyBackend::allocBufferPair(
     char *buffer_base = nullptr;
     if (is_cuda) {
 #ifdef USE_CUDA
-        cudaError_t err = cudaMalloc(&buffer_base, total_size);
+        // Extract device ID from location string (e.g., "cuda:1" -> 1)
+        int device_id = std::stoi(location.substr(5));
+        cudaError_t err = cudaSetDevice(device_id);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("Failed to set CUDA device ") +
+                                     std::to_string(device_id) + ": " +
+                                     cudaGetErrorString(err));
+        }
+
+        err = cudaMalloc(&buffer_base, total_size);
         if (err != cudaSuccess) {
             throw std::runtime_error(
-                std::string("Failed to allocate GPU memory: ") +
-                cudaGetErrorString(err));
+                std::string("Failed to allocate GPU memory on device ") +
+                std::to_string(device_id) + ": " + cudaGetErrorString(err));
         }
 #else
         throw std::runtime_error(

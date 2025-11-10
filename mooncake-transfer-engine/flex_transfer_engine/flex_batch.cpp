@@ -205,14 +205,16 @@ void FlexBatch::checkTcpProgress() {
             goto completed;  // must be finalized
         return;
     }
-    // no new progress; check if finalized
-    if (!tcp_ctrl_block_->mutex_.try_lock()) return;  // worker is working on it
+    {  // no new progress; check if finalized
+        std::unique_lock<std::mutex> lock(tcp_ctrl_block_->mutex_,
+                                          std::try_to_lock);
+        if (!lock.owns_lock()) return;  // Worker is still working
 
-    // else: mutex is successfully acquired, meaning the worker has finalized it
-    // read progress again to prevent race
-    known_progress_ =
-        tcp_ctrl_block_->progress_counter.load(std::memory_order_acquire);
-    tcp_ctrl_block_->mutex_.unlock();
+        // else: mutex is successfully acquired, meaning the worker has
+        // finalized it read progress again to prevent race
+        known_progress_ =
+            tcp_ctrl_block_->progress_counter.load(std::memory_order_acquire);
+    }
     if (known_progress_ == static_cast<int64_t>(entries_.size()))
         goto completed;
 

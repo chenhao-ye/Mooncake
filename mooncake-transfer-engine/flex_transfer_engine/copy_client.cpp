@@ -19,6 +19,7 @@
 #include "util.h"
 
 CopyClient::~CopyClient() {
+    std::lock_guard<std::mutex> lock(connection_cache_mutex_);
     for (const auto &[_, conn] : connection_cache_) {
         if (conn) conn->cleanup();
     }

@@ -168,24 +168,32 @@ void CopyServer::workerThread() {
 
             // Check for new connections on listener
             if (ready_fd == listener_fd_) {
-                struct sockaddr_in client_addr;
+                struct sockaddr_storage client_addr;
                 socklen_t client_len = sizeof(client_addr);
 
                 int client_fd = accept(
                     listener_fd_, (struct sockaddr *)&client_addr, &client_len);
                 if (client_fd >= 0) {
-                    char client_ip[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &client_addr.sin_addr, client_ip,
-                              sizeof(client_ip));
-                    std::cerr << "Accepted connection from " << client_ip << ":"
-                              << ntohs(client_addr.sin_port) << std::endl;
+                    char client_ip[INET6_ADDRSTRLEN];
+                    char client_port[NI_MAXSERV];
+                    int rc = getnameinfo(
+                        (struct sockaddr *)&client_addr, client_len, client_ip,
+                        sizeof(client_ip), client_port, sizeof(client_port),
+                        NI_NUMERICHOST | NI_NUMERICSERV);
+                    if (rc == 0) {
+                        std::cerr << "Accepted connection from " << client_ip
+                                  << ":" << client_port << std::endl;
+                    } else {
+                        std::cerr
+                            << "Accepted connection (failed to resolve address)"
+                            << std::endl;
+                    }
 
                     // Add new client to epoll
                     struct epoll_event ev;
                     ev.events = EPOLLIN;
                     ev.data.fd = client_fd;
-                    int rc =
-                        epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev);
+                    rc = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev);
                     if (rc < 0) {
                         std::cerr << "Failed to add client to epoll: "
                                   << strerror(errno) << std::endl;

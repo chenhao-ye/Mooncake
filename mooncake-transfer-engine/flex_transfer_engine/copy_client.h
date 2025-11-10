@@ -35,7 +35,7 @@ struct ClientConnection {
             throw std::runtime_error("Fail to clear ClientConnection");
     }
 
-    void free() {
+    void cleanup() {
         if (fd >= 0) close(fd);
         fd = -1;
     }

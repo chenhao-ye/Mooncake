@@ -40,7 +40,7 @@ class RegionMgr {
                 return LocId{.idx = i, .cuda_device = cuda_device};
         }
         // not found, add new location
-        uint32_t idx = static_cast<int32_t>(location_strings_.size());
+        uint32_t idx = static_cast<uint32_t>(location_strings_.size());
         location_strings_.emplace_back(location);
         return LocId{.idx = idx, .cuda_device = cuda_device};
     }

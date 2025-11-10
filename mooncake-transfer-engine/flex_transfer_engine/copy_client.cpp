@@ -20,7 +20,7 @@
 
 CopyClient::~CopyClient() {
     for (const auto &[_, conn] : connection_cache_) {
-        if (conn) conn->free();
+        if (conn) conn->cleanup();
     }
 }
 
@@ -49,7 +49,7 @@ void CopyClient::freeConnection(ClientConnection *conn) {
         }
     }
     // otherwise, close this connection and free it
-    conn->free();
+    conn->cleanup();
     delete conn;
 }
 

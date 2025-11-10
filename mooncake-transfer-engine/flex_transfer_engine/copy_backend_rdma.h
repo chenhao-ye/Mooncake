@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -84,6 +85,7 @@ class RdmaCopyBackend {
     // When this function is called, there MUST be a buffer pair ready with the
     // proper length (which should have been set up upon registration)
     BufferPair &getBufferPair(LocId loc_id) {
+        assert(static_cast<size_t>(loc_id.idx) < buffer_pool_.size());
         return *buffer_pool_[loc_id.idx];
     }
     // Require regions_mutex_ to be held before calling

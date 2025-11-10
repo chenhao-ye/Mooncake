@@ -24,7 +24,7 @@ void FlexBatch::free() {
     // getTransferStatus. if that didn't happen, likely something went wrong; we
     // therefore don't reuse the connection.
     if (client_conn_) {
-        client_conn_->free();
+        client_conn_->cleanup();
         delete client_conn_;
         client_conn_ = nullptr;
     }
@@ -180,7 +180,7 @@ void FlexBatch::checkRdmaProgress() {
     // - the server has closed the connection (nbytes=0) OR
     // - the server crashed (nbytes<0 with unexpected errno) OR
     // - the finalized value is not an expected value
-    client_conn_->free();
+    client_conn_->cleanup();
     delete client_conn_;
     client_conn_ = nullptr;
     engine_->getCopyClient().freeCtrlBlock(rdma_ctrl_block_);
@@ -217,7 +217,7 @@ void FlexBatch::checkTcpProgress() {
         goto completed;
 
     // else: something went wrong (some tasks failed); free the connection
-    client_conn_->free();
+    client_conn_->cleanup();
     delete client_conn_;
     client_conn_ = nullptr;
     engine_->getCopyClient().freeCtrlBlock(tcp_ctrl_block_);

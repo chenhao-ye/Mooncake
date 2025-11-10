@@ -95,7 +95,7 @@ void CopyServer::startListener() {
     }
 
     // finally, start worker thread
-    worker_running_ = true;
+    worker_running_.store(true, std::memory_order_release);
     worker_thread_ = std::thread(&CopyServer::workerThread, this);
 }
 

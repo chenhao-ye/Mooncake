@@ -66,10 +66,10 @@ class RdmaCopyBackend {
     int prepareBufferPair(LocId loc_id, const std::string &location,
                           size_t length);
 
-    // Require regions_mutex_
+    // Will acquire regions_mutex_
     // Process RDMA transfer requests
     // Return 0 for success; non-zero for error; update num_done
-    int processRequest(segment_id_t target_segment_id,
+    int processRequest(const std::string &target_segment_name,
                        uint64_t target_progress_addr, std::vector<Task> &tasks,
                        RdmaCopyCtrlBlock *ctrl_block, int32_t &num_done);
 

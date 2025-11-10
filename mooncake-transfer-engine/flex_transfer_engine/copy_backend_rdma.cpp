@@ -5,6 +5,7 @@
 #include <iostream>
 
 #include "flex_transfer_engine.h"
+#include "transfer_engine_c.h"
 
 void RdmaCopyBackend::cleanup() {
     {
@@ -71,11 +72,16 @@ int RdmaCopyBackend::prepareBufferPair(LocId loc_id,
     return 0;
 }
 
-int RdmaCopyBackend::processRequest(segment_id_t target_segment_id,
+int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
                                     uint64_t target_progress_addr,
                                     std::vector<Task> &tasks,
                                     RdmaCopyCtrlBlock *ctrl_block,
                                     int32_t &num_done) {
+    segment_id_t target_segment_id = engine_.getSegmentId(target_segment_name);
+    if (target_segment_id < 0) return -1;
+
+    std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
+
     // num_done is a lower bound watermark: if task_idx < num_done, it is done
     // and its batch_id is INVALID_BATCH; otherwise, it may or may not be done
     // (it may be done because another task has waited on it for its buffer)

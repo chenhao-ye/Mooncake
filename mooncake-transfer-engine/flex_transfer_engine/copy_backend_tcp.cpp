@@ -193,6 +193,7 @@ void TcpCopyBackend::waitForCudaCopy(cudaStream_t stream) {
 
 int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
     if (tasks.empty()) return 0;
+    std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
 
 #ifdef USE_CUDA
     // Initialize buffer pair on first use (only needed for CUDA)
@@ -296,6 +297,7 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks,
                                     std::atomic_int64_t &progress_counter) {
     if (tasks.empty()) return 0;
+    std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
 
 #ifdef USE_CUDA
     // Initialize buffer pair on first use (only needed for CUDA)

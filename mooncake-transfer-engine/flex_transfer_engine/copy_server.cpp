@@ -240,25 +240,18 @@ cleanup:
 
 int CopyServer::processRdmaRequest(int client_fd) {
     int rc;
-    std::string segment_name;
+    std::string target_segment_name;
     uint64_t target_progress_addr = 0;
     std::vector<RdmaCopyBackend::Task> tasks;
-    segment_id_t target_segment_id;
     RdmaCopyCtrlBlock *ctrl_block = nullptr;
     int32_t num_done = 0;
     bool success = false;
 
-    rc = readSegmentName(client_fd, segment_name);
+    rc = readSegmentName(client_fd, target_segment_name);
     if (rc) goto cleanup;
 
     rc = readRdmaRequests(client_fd, target_progress_addr, tasks);
     if (rc) goto cleanup;
-
-    target_segment_id = engine_.getSegmentId(segment_name);
-    if (target_segment_id < 0) {
-        std::cerr << "Failed to open segment: " << segment_name << std::endl;
-        goto cleanup;
-    }
 
     ctrl_block = rdma_copy_backend_.allocCtrlBlock();
     if (!ctrl_block) {
@@ -266,13 +259,9 @@ int CopyServer::processRdmaRequest(int client_fd) {
         goto cleanup;
     }
 
-    {
-        std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
-        rc = rdma_copy_backend_.processRequest(target_segment_id,
-                                               target_progress_addr, tasks,
-                                               ctrl_block, num_done);
-        if (rc == 0) success = true;
-    }
+    rc = rdma_copy_backend_.processRequest(
+        target_segment_name, target_progress_addr, tasks, ctrl_block, num_done);
+    if (rc == 0) success = true;
 
 cleanup:
     if (ctrl_block) rdma_copy_backend_.freeCtrlBlock(ctrl_block);
@@ -297,7 +286,6 @@ int CopyServer::processTcpRequest(int client_fd) {
     rc = readTcpRequests(client_fd, tasks);
     if (rc) return -1;
 
-    std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
     return tcp_copy_backend_.processRequest(client_fd, tasks);
 }
 

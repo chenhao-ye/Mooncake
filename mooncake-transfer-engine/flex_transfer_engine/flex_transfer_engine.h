@@ -21,15 +21,15 @@ class FlexTransferEngine;
 
 /**
  * Mark the target transfer mode for registration.
- * Note these are flag enum where `Direct | Copy` is acceptable.
+ * Note these are flag enum, where `Direct | Copy` is acceptable.
  */
 enum class RegMode : uint8_t {
-    // let the transfer engine decide: copy_server_enabled_ ? Copy : Direct
+    // let the transfer engine decide
     Auto = 0,
     // directly register with RDMA NICs, which enable zero-copy direct transfer
     Direct = 1 << 0,
-    // record in copiable_regions that can serve via copy-based transfer
-    Copy = 1 << 1,  // via either RDMA write or TCP
+    // record in copiable_regions for copy-based transfer
+    Copy = 1 << 1,  // via either RDMA or TCP
 };
 
 inline RegMode operator|(RegMode a, RegMode b) {
@@ -52,8 +52,8 @@ inline bool operator&(RegMode a, RegMode b) {
  * CPU involvement.
  *
  * Copy Mode: A background TCP listener thread will accept the read requests
- * (write is not supported yet) and send data back via RDMA or TCP.
- * NOTE: The Copy Mode only implies the copying happens on the server side; the
+ * (write is not supported yet) and send data back via RDMA or TCP. Note the
+ * Copy Mode only implies the copying happens on the server side; the
  * client-side has no copy if using RDMA to receive the data.
  *
  * To use Direct Mode: the server registers memory with RegMode::Direct; the
@@ -75,18 +75,18 @@ class FlexTransferEngine {
      * Constructor.
      * @param metadata_conn_string Connection string for metadata server
      * @param local_server_name Local server name
-     * @param ctrl_block_location Location for RdmaCopyCtrlBlock registration
-     * (e.g., "cpu:0")
+     * @param rdma_ctrl_block_location Location for RdmaCopyCtrlBlock
+     * registration (e.g., "cpu:0")
      * @param copy_server_enabled If true, starts TCP listener for copy-based
      * transfer; otherwise, only direct RDMA transfer is supported.
      * @param default_reg_mode Default registration mode when RegMode::Auto is
      * provided for (un)registerLocalMemory(Batch); if RegMode::Auto is provided
-     * here, will infer: copy_server_enabled ? RegMode::Copy : RegMode::Direct.
-     * This is desired if no TCP copy transfer is expected.
+     * here, will infer: copy_server_enabled ? RegMode::Copy : RegMode::Direct,
+     * which is desired if no TCP copy transfer is expected.
      */
     explicit FlexTransferEngine(const std::string &metadata_conn_string,
                                 const std::string &local_server_name,
-                                const std::string &ctrl_block_location,
+                                const std::string &rdma_ctrl_block_location,
                                 bool copy_server_enabled,
                                 RegMode default_reg_mode = RegMode::Auto);
 

@@ -25,24 +25,25 @@
 #include <cuda_runtime.h>
 #endif
 
-FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
-                                       const std::string &local_server_name,
-                                       const std::string &ctrl_block_location,
-                                       bool copy_server_enabled,
-                                       RegMode default_reg_mode)
+FlexTransferEngine::FlexTransferEngine(
+    const std::string &metadata_conn_string,
+    const std::string &local_server_name,
+    const std::string &rdma_ctrl_block_location, bool copy_server_enabled,
+    RegMode default_reg_mode)
     : copy_server_enabled_(copy_server_enabled),
       default_reg_mode_(
           default_reg_mode == RegMode::Auto
               ? (copy_server_enabled ? RegMode::Copy : RegMode::Direct)
               : default_reg_mode),
       region_mgr_(),
-      rdma_copy_backend_(*this, region_mgr_, ctrl_block_location),
+      rdma_copy_backend_(*this, region_mgr_, rdma_ctrl_block_location),
       tcp_copy_backend_(*this, region_mgr_),
-      copy_server_(*this, region_mgr_, rdma_copy_backend_, tcp_copy_backend_),
-      copy_client_(local_server_name, rdma_copy_backend_, tcp_copy_backend_) {
-    if (ctrl_block_location.find("cuda:") == 0) {
+      copy_server_(rdma_copy_backend_, tcp_copy_backend_),
+      copy_client_(rdma_copy_backend_, tcp_copy_backend_, local_server_name) {
+    if (rdma_ctrl_block_location.find("cuda:") == 0) {
         throw std::invalid_argument(
-            "ctrl_block_location must not be on CUDA: " + ctrl_block_location);
+            "rdma_ctrl_block_location must not be on CUDA: " +
+            rdma_ctrl_block_location);
     }
 
     // Create the underlying TransferEngine

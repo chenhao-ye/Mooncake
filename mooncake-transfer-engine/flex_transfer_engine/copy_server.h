@@ -19,12 +19,9 @@ class FlexTransferEngine;
 
 class CopyServer {
    public:
-    CopyServer(FlexTransferEngine &engine, RegionMgr &region_mgr,
-               RdmaCopyBackend &rdma_copy_backend,
+    CopyServer(RdmaCopyBackend &rdma_copy_backend,
                TcpCopyBackend &tcp_copy_backend)
-        : engine_(engine),
-          region_mgr_(region_mgr),
-          rdma_copy_backend_(rdma_copy_backend),
+        : rdma_copy_backend_(rdma_copy_backend),
           tcp_copy_backend_(tcp_copy_backend),
           worker_running_(false),
           listener_fd_(-1),
@@ -38,11 +35,6 @@ class CopyServer {
     const std::string &getServerUrl() const { return local_copy_server_url_; }
 
    private:
-    // Back pointer to FlexTransferEngine
-    FlexTransferEngine &engine_;
-
-    // Copiable memory regions
-    RegionMgr &region_mgr_;
     RdmaCopyBackend &rdma_copy_backend_;
     TcpCopyBackend &tcp_copy_backend_;
 

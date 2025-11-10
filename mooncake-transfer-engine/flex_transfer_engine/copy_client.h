@@ -48,12 +48,12 @@ struct ClientConnection {
  */
 class CopyClient {
    public:
-    CopyClient(const std::string local_segment_name,
-               RdmaCopyBackend &rdma_copy_backend,
-               TcpCopyBackend &tcp_copy_backend)
-        : local_segment_name_(local_segment_name),
-          rdma_copy_backend_(rdma_copy_backend),
-          tcp_copy_backend_(tcp_copy_backend) {}
+    CopyClient(RdmaCopyBackend &rdma_copy_backend,
+               TcpCopyBackend &tcp_copy_backend,
+               const std::string local_segment_name)
+        : rdma_copy_backend_(rdma_copy_backend),
+          tcp_copy_backend_(tcp_copy_backend),
+          local_segment_name_(local_segment_name) {}
     ~CopyClient();
 
     ClientConnection *allocConnection(const std::string &server_url);
@@ -82,15 +82,15 @@ class CopyClient {
     /**
      * Connect to a remote CopyServer.
      * @param server_url URL in format "ip:port"
-     * @return File descriptor
+     * @return server fd
      */
     int connectToCopyServer(const std::string &server_url);
 
-    // Let the remote CopyServer know where to submit RDMA write
-    const std::string local_segment_name_;
-
     RdmaCopyBackend &rdma_copy_backend_;
     TcpCopyBackend &tcp_copy_backend_;
+
+    // Let the remote CopyServer know where to submit RDMA write
+    const std::string local_segment_name_;
 
     // Cached TCP connections to remote CopyServers (server_url -> connection)
     std::unordered_map<std::string, ClientConnection *> connection_cache_;

@@ -48,8 +48,14 @@ class TcpCopyBackend {
     TcpCopyBackend &operator=(const TcpCopyBackend &) = delete;
     TcpCopyBackend &operator=(TcpCopyBackend &&) = delete;
 
+    // Note we assume there is no concurrent CopyServer calling processRequest
+    // and CopyClient calling processResponse, so both functions will acquire
+    // the regions_mutex_. It could be optimized as rwlock if necessary.
+
+    // Will acquire regions_mutex_
     int processRequest(int client_fd, std::vector<Task> &tasks);
 
+    // Will acquire regions_mutex_
     // for CopyClient to process TCP responses from processRequest
     // will lively update progress_counter for every task completion
     int processResponse(int server_fd, std::vector<Task> &tasks,
@@ -90,7 +96,7 @@ class TcpCopyBackend {
     void ensureCudaDevice(int target_device, int &curr_device);
     // start async memory copy (GPU <-> buffer) and handle errors
     void startAsyncCudaCopy(int buffer_idx, const ChunkIter *chunk,
-                        cudaMemcpyKind direction);
+                            cudaMemcpyKind direction);
     // wait for CUDA stream synchronization
     void waitForCudaCopy(cudaStream_t stream);
 #endif

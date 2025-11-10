@@ -29,7 +29,7 @@ FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
                                        const std::string &local_server_name,
                                        bool enable_copy,
                                        const std::string &ctrl_block_location)
-    : enable_copy_(enable_copy),
+    : copy_server_enabled_(enable_copy),
       region_mgr_(),
       rdma_copy_backend_(*this, region_mgr_, ctrl_block_location),
       tcp_copy_backend_(*this, region_mgr_),
@@ -47,13 +47,19 @@ FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
                                      /*unused*/ 12345, /*auto_discover*/ true);
     if (!engine_) throw std::runtime_error("Failed to create TransferEngine");
 
-    // Start TCP listener only if enable_copy_ is true
-    if (enable_copy_) copy_server_.startListener();
+    // Start TCP listener only if copy_server_enabled_ is true
+    if (copy_server_enabled_) copy_server_.startListener();
 }
 
 FlexTransferEngine::~FlexTransferEngine() {
-    if (enable_copy_)
-        copy_server_.cleanup();  // release RDMA-registered buffers
+    if (copy_server_enabled_) copy_server_.stopListener();
+
+    {
+        std::lock_guard<std::mutex> lock(region_mgr_.regions_mutex_);
+        // release RDMA-registered buffers before engine_ destruction
+        rdma_copy_backend_.cleanup();
+        tcp_copy_backend_.cleanup();
+    }
 
     {
         std::lock_guard<std::mutex> segment_lock(segment_cache_mutex_);
@@ -68,32 +74,38 @@ FlexTransferEngine::~FlexTransferEngine() {
 int FlexTransferEngine::registerLocalMemory(uintptr_t addr, size_t length,
                                             const std::string &location,
                                             bool remote_accessible,
-                                            bool remote_atomic,
-                                            TransferMode mode) {
-    if (mode == TransferMode::Auto)
-        mode = enable_copy_ ? TransferMode::Copy : TransferMode::Direct;
-    // do actual RDMA registration
+                                            bool remote_atomic, RegMode mode) {
+    if (mode == RegMode::Auto)
+        mode = copy_server_enabled_ ? RegMode::Copy : RegMode::Direct;
     int rc = 0;
-    if (mode & TransferMode::Direct) {
+    if (mode & RegMode::Direct) {  // do actual RDMA registration
         rc = ::registerLocalMemory(engine_, reinterpret_cast<void *>(addr),
                                    length, location.c_str(), remote_accessible,
                                    remote_atomic);
         if (rc) return rc;
     }
-    if (mode & TransferMode::Copy) {
-        if (!enable_copy_)
-            throw std::invalid_argument("Copy mode was not enabled");
-        rc = copy_server_.registerLocalMemory(reinterpret_cast<void *>(addr),
-                                              length, location);
-        if (rc) return rc;
+    if (mode & RegMode::Copy) {
+        std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
+
+        LocId loc_id = region_mgr_.getLocId(location);
+        region_mgr_.addRegion(reinterpret_cast<void *>(addr), length, loc_id);
+
+        if (copy_server_enabled_) {
+            rc = rdma_copy_backend_.prepareBufferPair(loc_id, location, length);
+            if (rc) {
+                region_mgr_.removeRegion(reinterpret_cast<void *>(addr));
+                return -1;
+            }
+        }
+        std::cerr << "Registered memory at " << addr << " size " << length
+                  << " for location " << location << std::endl;
     }
     return 0;
 }
 
-int FlexTransferEngine::unregisterLocalMemory(uintptr_t addr,
-                                              TransferMode mode) {
-    if (mode == TransferMode::Auto)
-        mode = enable_copy_ ? TransferMode::Copy : TransferMode::Direct;
+int FlexTransferEngine::unregisterLocalMemory(uintptr_t addr, RegMode mode) {
+    if (mode == RegMode::Auto)
+        mode = copy_server_enabled_ ? RegMode::Copy : RegMode::Direct;
 
     // Note if an address is registered multiple times, direct mode will expect
     // the exact number of unregister but the copy mode only expect one.
@@ -104,16 +116,15 @@ int FlexTransferEngine::unregisterLocalMemory(uintptr_t addr,
     // modes are enabled.
 
     int rc = 0;
-    if (mode & TransferMode::Direct) {
+    if (mode & RegMode::Direct) {
         rc = ::unregisterLocalMemory(engine_, reinterpret_cast<void *>(addr));
         if (rc) return rc;
     }
     // Note if there are duplicated address, copy_server_.unregisterLocalMemory
     // can return an error
-    if (mode & TransferMode::Copy) {
-        if (!enable_copy_)
-            throw std::invalid_argument("Copy mode was not enabled");
-        rc = copy_server_.unregisterLocalMemory(reinterpret_cast<void *>(addr));
+    if (mode & RegMode::Copy) {
+        std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
+        rc = region_mgr_.removeRegion(reinterpret_cast<void *>(addr));
         if (rc) return rc;
     }
     return 0;
@@ -121,29 +132,47 @@ int FlexTransferEngine::unregisterLocalMemory(uintptr_t addr,
 
 int FlexTransferEngine::registerLocalMemoryBatch(
     std::vector<buffer_entry_t> &buffer_list, const std::string &location,
-    TransferMode mode) {
-    if (mode == TransferMode::Auto)
-        mode = enable_copy_ ? TransferMode::Copy : TransferMode::Direct;
+    RegMode mode) {
+    if (mode == RegMode::Auto)
+        mode = copy_server_enabled_ ? RegMode::Copy : RegMode::Direct;
 
     int rc = 0;
-    if (mode & TransferMode::Direct) {
+    if (mode & RegMode::Direct) {
         rc = ::registerLocalMemoryBatch(engine_, buffer_list.data(),
                                         buffer_list.size(), location.c_str());
         if (rc) return rc;
     }
-    if (mode & TransferMode::Copy) {
-        if (!enable_copy_)
-            throw std::invalid_argument("Copy mode was not enabled");
-        rc = copy_server_.registerLocalMemoryBatch(buffer_list, location);
-        if (rc) return rc;
+    if (mode & RegMode::Copy) {
+        std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
+        LocId loc_id = region_mgr_.getLocId(location);
+        size_t max_size = 0;
+
+        for (const auto &entry : buffer_list) {
+            if (entry.length > max_size) max_size = entry.length;
+            region_mgr_.addRegion(entry.addr, entry.length, loc_id);
+        }
+
+        if (copy_server_enabled_) {
+            rc = rdma_copy_backend_.prepareBufferPair(loc_id, location,
+                                                      max_size);
+            if (rc) {
+                for (const auto &entry : buffer_list)
+                    region_mgr_.removeRegion(entry.addr);
+                return -1;
+            }
+        }
+
+        std::cerr << "Registered " << buffer_list.size()
+                  << " buffers for location " << location << ", max size "
+                  << max_size << std::endl;
     }
     return 0;
 }
 
 int FlexTransferEngine::unregisterLocalMemoryBatch(
-    std::vector<uintptr_t> &addr_list, TransferMode mode) {
-    if (mode == TransferMode::Auto)
-        mode = enable_copy_ ? TransferMode::Copy : TransferMode::Direct;
+    std::vector<uintptr_t> &addr_list, RegMode mode) {
+    if (mode == RegMode::Auto)
+        mode = copy_server_enabled_ ? RegMode::Copy : RegMode::Direct;
 
     // Note if an address is registered multiple times, direct mode will expect
     // the exact number of unregister but the copy mode only expect one.
@@ -154,19 +183,22 @@ int FlexTransferEngine::unregisterLocalMemoryBatch(
     // modes are enabled.
 
     int rc = 0;
-    if (mode & TransferMode::Direct) {
+    if (mode & RegMode::Direct) {
         rc = ::unregisterLocalMemoryBatch(
             engine_, reinterpret_cast<void **>(addr_list.data()),
             addr_list.size());
         if (rc) return rc;
     }
-    if (mode & TransferMode::Copy) {
-        if (!enable_copy_)
-            throw std::invalid_argument("Copy mode was not enabled");
-        rc = copy_server_.unregisterLocalMemoryBatch(addr_list);
-        if (rc) return rc;
+    if (mode & RegMode::Copy) {
+        bool all_success = true;
+        std::lock_guard<std::mutex> regions_lock(region_mgr_.regions_mutex_);
+        for (uintptr_t addr : addr_list) {
+            rc = region_mgr_.removeRegion(reinterpret_cast<void *>(addr));
+            if (rc) all_success = false;  // not found, but will continue
+        }
+        if (!all_success) return -1;
     }
-    return rc;
+    return 0;
 }
 
 segment_id_t FlexTransferEngine::getSegmentId(const std::string &segment_name) {

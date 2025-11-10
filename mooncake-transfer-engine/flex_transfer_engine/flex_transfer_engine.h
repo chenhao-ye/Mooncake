@@ -23,8 +23,8 @@ class FlexTransferEngine;
  * Mark the target transfer mode for registration.
  * Note these are flag enum where `Direct | Copy` is acceptable.
  */
-enum class TransferMode : uint8_t {
-    // let the transfer engine decide: enable_copy_ ? Copy : Direct
+enum class RegMode : uint8_t {
+    // let the transfer engine decide: copy_server_enabled_ ? Copy : Direct
     Auto = 0,
     // directly register with RDMA NICs, which enable zero-copy direct transfer
     Direct = 1 << 0,
@@ -32,15 +32,15 @@ enum class TransferMode : uint8_t {
     Copy = 1 << 1,  // via either RDMA write or TCP
 };
 
-inline TransferMode operator|(TransferMode a, TransferMode b) {
-    return static_cast<TransferMode>(
-        static_cast<std::underlying_type_t<TransferMode>>(a) |
-        static_cast<std::underlying_type_t<TransferMode>>(b));
+inline RegMode operator|(RegMode a, RegMode b) {
+    return static_cast<RegMode>(
+        static_cast<std::underlying_type_t<RegMode>>(a) |
+        static_cast<std::underlying_type_t<RegMode>>(b));
 }
 
-inline bool operator&(TransferMode a, TransferMode b) {
-    return static_cast<std::underlying_type_t<TransferMode>>(a) &
-           static_cast<std::underlying_type_t<TransferMode>>(b);
+inline bool operator&(RegMode a, RegMode b) {
+    return static_cast<std::underlying_type_t<RegMode>>(a) &
+           static_cast<std::underlying_type_t<RegMode>>(b);
 }
 
 /**
@@ -48,14 +48,26 @@ inline bool operator&(TransferMode a, TransferMode b) {
  * supports both direct RDMA transfers and copy-based transfers.
  *
  * Direct Mode: Register the user-specified memory directly with RDMA NICs;
- * other FlexTransferEngine can directly read/write these memory without
+ * remote FlexTransferEngine can directly read/write these memory without any
  * CPU involvement.
  *
- * Copy Mode: Only register some buffers with RDMA NICs. A background TCP
- * listener thread will accept the requests and copy dataf from user-specified
- * memory into the buffers and submit RDMA requests.
+ * Copy Mode: A background TCP listener thread will accept the read requests
+ * (write is not supported yet) and send data back via RDMA or TCP.
+ * NOTE: The Copy Mode only implies the copying happens on the server side; the
+ * client-side has no copy if using RDMA to receive the data.
  *
- * Copy Mode is enabled via flag `enable_copy_` at construction time.
+ * To use Direct Mode: the server registers memory with RegMode::Direct; the
+ * client registers memory with RegMode::Direct and submits with is_direct=true.
+ *
+ * To use Copy Mode (RDMA): the server registers memory with RegMode::Copy; the
+ * client registers memory with RegMode::Direct and submit with is_direct=false
+ * and use_rdma=true.
+ *
+ * To use Copy Mode (TCP): the server registers memory with RegMode::Copy; the
+ * client registers memory with RegMode::Copy and submits with is_direct=false
+ * and use_rdma=false.
+ *
+ * Note registration supports dual-mode (RegMode::Direct | RegMode::Copy).
  */
 class FlexTransferEngine {
    public:
@@ -76,18 +88,16 @@ class FlexTransferEngine {
 
     int registerLocalMemory(uintptr_t addr, size_t length,
                             const std::string &location, bool remote_accessible,
-                            bool remote_atomic,
-                            TransferMode mode = TransferMode::Auto);
+                            bool remote_atomic, RegMode mode = RegMode::Auto);
 
-    int unregisterLocalMemory(uintptr_t addr,
-                              TransferMode mode = TransferMode::Auto);
+    int unregisterLocalMemory(uintptr_t addr, RegMode mode = RegMode::Auto);
 
     int registerLocalMemoryBatch(std::vector<buffer_entry_t> &buffer_list,
                                  const std::string &location,
-                                 TransferMode mode = TransferMode::Auto);
+                                 RegMode mode = RegMode::Auto);
 
     int registerLocalMemoryBatch(MemoryBatch &memory_batch,
-                                 TransferMode mode = TransferMode::Auto) {
+                                 RegMode mode = RegMode::Auto) {
         for (auto &[location, buffers] : memory_batch.location_buffers_map) {
             int rc = registerLocalMemoryBatch(buffers, location, mode);
             if (rc) return rc;
@@ -96,7 +106,7 @@ class FlexTransferEngine {
     }
 
     int unregisterLocalMemoryBatch(std::vector<uintptr_t> &addr_list,
-                                   TransferMode mode = TransferMode::Auto);
+                                   RegMode mode = RegMode::Auto);
 
     int syncSegmentCache() { return ::syncSegmentCache(engine_); }
 
@@ -112,7 +122,11 @@ class FlexTransferEngine {
     segment_id_t getSegmentId(const std::string &segment_name);
 
    private:
-    const bool enable_copy_;  // Whether to enable copy-based transfer
+    // if enabled, the memory register with RegMode::Copy is accessible to
+    // the remote FlexTransferEngine via copy-based transfer.
+    // if disabled, the memory register with RegMode::Copy can only be used
+    // for CopyClient.
+    const bool copy_server_enabled_;
 
     transfer_engine_t engine_;
 
@@ -127,7 +141,7 @@ class FlexTransferEngine {
     RdmaCopyBackend rdma_copy_backend_;
     TcpCopyBackend tcp_copy_backend_;
 
-    // TCP listener and worker (only used when enable_copy is true)
+    // TCP listener and worker (only used when copy_server_enabled_ is true)
     CopyServer copy_server_;
 
     // Client when talking to a copy_server

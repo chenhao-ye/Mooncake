@@ -31,18 +31,6 @@ class CopyServer {
           stop_event_fd_(-1),
           epoll_fd_(-1) {}
 
-    // must called in FlexTransferEngine's dtor, because it relies on a valid
-    // TransferEngine
-    void cleanup();
-
-    // Register/unregister memory regions for copy-based transfer
-    int registerLocalMemory(void *addr, size_t length,
-                            const std::string &location);
-    int unregisterLocalMemory(void *addr);
-    int registerLocalMemoryBatch(std::vector<buffer_entry_t> &buffer_list,
-                                 const std::string &location);
-    int unregisterLocalMemoryBatch(std::vector<uintptr_t> &addr_list);
-
     // Start/stop the TCP listener
     void startListener();
     void stopListener();

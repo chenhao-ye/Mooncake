@@ -54,7 +54,6 @@ class RegionMgr {
         return num_erased > 0 ? 0 : -1;
     }
 
-    // Require regions_mutex_ to be held before calling
     Region *getRegion(void *addr, size_t length) {
         // fast path: the addr is the base of a registered region
         auto it = regions_.find(addr);

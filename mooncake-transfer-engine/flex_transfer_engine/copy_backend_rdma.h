@@ -96,7 +96,9 @@ class RdmaCopyBackend {
     std::vector<RdmaCopyCtrlBlock *> ctrl_block_cache_;
     std::mutex ctrl_block_mutex_;
 
-    std::vector<BufferPair *> buffer_pool_;  // BufferPair per location
+    // BufferPair per location
+    // Require regions_mutex_ to be held before accessing
+    std::vector<BufferPair *> buffer_pool_;
 
    private: /* Helper functions for task execution */
     // Copy memory from src to dst; handle both CPU and CUDA memory

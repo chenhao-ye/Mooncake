@@ -1,6 +1,7 @@
 #include "copy_backend_tcp.h"
 
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 
@@ -158,8 +159,9 @@ void TcpCopyBackend::ensureCudaDevice(int target_device, int &curr_device) {
     }
 }
 
-void TcpCopyBackend::startAsyncCopy(int buffer_idx, const ChunkIter *chunk_iter,
-                                    cudaMemcpyKind direction) {
+void TcpCopyBackend::startAsyncCudaCopy(int buffer_idx,
+                                        const ChunkIter *chunk_iter,
+                                        cudaMemcpyKind direction) {
     void *dst, *src;
 
     if (direction == cudaMemcpyDeviceToHost) {
@@ -198,7 +200,7 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 #endif
 
     // Iteration state for chunk traversal
-    TaskIter task_iter;
+    TaskIter task_iter;  // indicate the next chunk to copy
 
     // Use two ChunkIter objects and swap pointers to avoid copying
     ChunkIter chunk_iters[2];
@@ -220,7 +222,7 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
     if (curr->loc_id.isCuda()) {
 #ifdef USE_CUDA
         ensureCudaDevice(curr->loc_id.cuda_device, curr_device);
-        startAsyncCopy(buffer_idx, curr, cudaMemcpyDeviceToHost);
+        startAsyncCudaCopy(buffer_idx, curr, cudaMemcpyDeviceToHost);
 #endif  // skip else check because getNextChunk has already checked
     }
 
@@ -229,7 +231,7 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 #ifdef USE_CUDA
     if (has_next && next->loc_id.isCuda()) {
         ensureCudaDevice(next->loc_id.cuda_device, curr_device);
-        startAsyncCopy(buffer_idx, next, cudaMemcpyDeviceToHost);
+        startAsyncCudaCopy(buffer_idx, next, cudaMemcpyDeviceToHost);
     }
 #endif  // skip else check because getNextChunk has already checked
 
@@ -266,7 +268,7 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 #ifdef USE_CUDA
         if (has_next && next->loc_id.isCuda()) {
             ensureCudaDevice(next->loc_id.cuda_device, curr_device);
-            startAsyncCopy(buffer_idx, next, cudaMemcpyDeviceToHost);
+            startAsyncCudaCopy(buffer_idx, next, cudaMemcpyDeviceToHost);
         }
 #endif
     }
@@ -291,7 +293,8 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
     return 0;
 }
 
-int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks) {
+int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks,
+                                    std::atomic_int64_t &progress_counter) {
     if (tasks.empty()) return 0;
 
 #ifdef USE_CUDA
@@ -300,13 +303,16 @@ int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks) {
 #endif
 
     // Iteration state for chunk traversal
-    TaskIter task_iter;
+    TaskIter task_iter;  // indicate the next chunk to receive
 
     // Use two ChunkIter objects and swap pointers to avoid copying
     ChunkIter chunk_iters[2];
     ChunkIter *prev = &chunk_iters[0];
     ChunkIter *curr = &chunk_iters[1];
     int buffer_idx = 0;
+
+    // if non-zero
+    int64_t upcoming_progress = 0;
 
 #ifdef USE_CUDA
     // Track prev CUDA device to avoid redundant cudaSetDevice calls
@@ -332,7 +338,7 @@ int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks) {
 #ifdef USE_CUDA
     if (prev->loc_id.isCuda()) {
         ensureCudaDevice(prev->loc_id.cuda_device, curr_device);
-        startAsyncCopy(buffer_idx, prev, cudaMemcpyHostToDevice);
+        startAsyncCudaCopy(buffer_idx, prev, cudaMemcpyHostToDevice);
     }
 #endif
 
@@ -356,7 +362,7 @@ int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks) {
 #ifdef USE_CUDA
         if (curr->loc_id.isCuda()) {
             ensureCudaDevice(curr->loc_id.cuda_device, curr_device);
-            startAsyncCopy(buffer_idx, curr, cudaMemcpyHostToDevice);
+            startAsyncCudaCopy(buffer_idx, curr, cudaMemcpyHostToDevice);
         }
 #endif
 
@@ -367,13 +373,27 @@ int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks) {
         }
 #endif
 
+        // task_iter.chunk_offset == 0 means the next task will be a new task,
+        // so curr is the last chunk of its task. since, the copy of curr has
+        // not yet done, so we need to wait until the next loop to update the
+        // progress counter; we therefore set `upcoming_progress` here to
+        // schedule the update
+        if (upcoming_progress > 0) {
+            progress_counter.store(upcoming_progress,
+                                   std::memory_order_release);
+            upcoming_progress = 0;
+        }
+        if (task_iter.chunk_offset == 0) {  // schedule progress update
+            upcoming_progress = static_cast<int64_t>(task_iter.task_idx);
+        }
+
         // Advance pipeline: swap prev and curr
         ChunkIter *temp = prev;
         prev = curr;
         curr = temp;
 
         buffer_idx = 1 - buffer_idx;  // toggle
-        // invariant: curr is done while prev may have pending copy
+        // invariant: curr is done, and prev has pending copy
     }
 
     // ===== Phase 3: Drain the last chunk =====
@@ -382,6 +402,8 @@ int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks) {
         waitForCudaCopy(buffer_pair_->streams[prev->buffer_idx]);
     }
 #endif
+
+    progress_counter.store(tasks.size(), std::memory_order_release);
 
     std::cerr << "Completed TCP transfer response: received " << tasks.size()
               << " tasks" << std::endl;
@@ -397,14 +419,18 @@ TcpCopyCtrlBlock::TcpCopyCtrlBlock(TcpCopyBackend &backend)
 }
 
 void TcpCopyCtrlBlock::workerThreadFunc(TcpCopyCtrlBlock *ctrl_block) {
+    // the worker finalizes a progress by releasing the mutex within cv_.wait()
+    // if other thread can acquire mutex, the worker must have done its
+    // previously tasks and is not working now
     std::unique_lock<std::mutex> lock(ctrl_block->mutex_);
-    while (true) {
-        ctrl_block->cv_.wait(lock, [ctrl_block]() {
-            return !ctrl_block->worker_running_ || ctrl_block->server_fd >= 0;
-        });
-        if (!ctrl_block->worker_running_) break;
-        ctrl_block->backend_.processResponse(ctrl_block->server_fd,
-                                             ctrl_block->tasks);
+    while (ctrl_block->worker_running_) {
+        ctrl_block->cv_.wait(lock);
+        if (ctrl_block->server_fd < 0) continue;
+
+        int rc = ctrl_block->backend_.processResponse(
+            ctrl_block->server_fd, ctrl_block->tasks,
+            ctrl_block->progress_counter);
+        if (rc) std::cerr << "Error processing TCP response" << std::endl;
         // reset all fields to indicate done
         ctrl_block->server_fd = -1;
         int64_t num_done = ctrl_block->tasks.size();

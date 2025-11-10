@@ -51,7 +51,9 @@ class TcpCopyBackend {
     int processRequest(int client_fd, std::vector<Task> &tasks);
 
     // for CopyClient to process TCP responses from processRequest
-    int processResponse(int server_fd, std::vector<Task> &tasks);
+    // will lively update progress_counter for every task completion
+    int processResponse(int server_fd, std::vector<Task> &tasks,
+                        std::atomic_int64_t &progress_counter);
 
     void cleanup();
 
@@ -87,15 +89,13 @@ class TcpCopyBackend {
     // set CUDA device if needed (avoids redundant calls)
     void ensureCudaDevice(int target_device, int &curr_device);
     // start async memory copy (GPU <-> buffer) and handle errors
-    void startAsyncCopy(int buffer_idx, const ChunkIter *chunk,
+    void startAsyncCudaCopy(int buffer_idx, const ChunkIter *chunk,
                         cudaMemcpyKind direction);
     // wait for CUDA stream synchronization
     void waitForCudaCopy(cudaStream_t stream);
-
 #endif
 
-   private:
-    /* BufferPair definition */
+   private: /* BufferPair definition */
 #ifdef USE_CUDA
     struct BufferPair {
         // Fixed buffer size for chunked transfers (only needed for CUDA)
@@ -118,6 +118,11 @@ class TcpCopyBackend {
 #endif
 };
 
+/**
+ * Every TcpCopyCtrlBlock has a dedicated worker thread that processes
+ * responses from socket asynchronously. Cache TcpCopyCtrlBlock to reuse the
+ * worker thread.
+ */
 struct TcpCopyCtrlBlock {
     // update these fields when using the ctrl block
     std::atomic_int64_t progress_counter = 0;

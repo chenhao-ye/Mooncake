@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 
 #include "flex_transfer_engine.h"
@@ -21,17 +22,24 @@ void FlexBatch::free() {
     // it is generally unexpected that free() see non-null client_conn_ or
     // xxx_ctrl_blocks, because they should have been freed when finalized upon
     // getTransferStatus. if that didn't happen, likely something went wrong; we
-    // therefore don't reuse the connection
+    // therefore don't reuse the connection.
     if (client_conn_) {
         client_conn_->free();
         delete client_conn_;
         client_conn_ = nullptr;
     }
     if (rdma_ctrl_block_) {
+        // FIXME: unclear whether the remote server may update the progress
+        // counter via RDMA; should revisit with the transfer failure protocol.
+        // for now, assume it won't.
         engine_->getCopyClient().freeCtrlBlock(rdma_ctrl_block_);
         rdma_ctrl_block_ = nullptr;
     }
     if (tcp_ctrl_block_) {
+        // wait until the working thread to finalize it (otherwise it is unsafe
+        // to have the worker still modifying the copiable region).
+        // the worker will release the mutex once it is done.
+        std::lock_guard lock(tcp_ctrl_block_->mutex_);
         engine_->getCopyClient().freeCtrlBlock(tcp_ctrl_block_);
         tcp_ctrl_block_ = nullptr;
     }
@@ -181,15 +189,35 @@ void FlexBatch::checkTcpProgress() {
         tcp_ctrl_block_->progress_counter.load(std::memory_order_acquire);
     assert(known_progress_ >= prev_progress);
     if (known_progress_ > prev_progress) {  // new progress made
-        if (known_progress_ == static_cast<int64_t>(entries_.size())) {
-            assert(client_conn_->has_pending);
-            // Tcp requests do not expect finalized value from socketF
-            client_conn_->has_pending = false;
-            auto &copy_client = engine_->getCopyClient();
-            copy_client.freeConnection(client_conn_);
-            client_conn_ = nullptr;
-            copy_client.freeCtrlBlock(tcp_ctrl_block_);
-            tcp_ctrl_block_ = nullptr;
-        }
+        if (known_progress_ == static_cast<int64_t>(entries_.size()))
+            goto completed;  // must be finalized
+        return;
     }
+    // no new progress; check if finalized
+    if (!tcp_ctrl_block_->mutex_.try_lock()) return;  // worker is working on it
+
+    // else: mutex is successfully acquired, meaning the worker has finalized it
+    // read progress again to prevent race
+    known_progress_ =
+        tcp_ctrl_block_->progress_counter.load(std::memory_order_acquire);
+    tcp_ctrl_block_->mutex_.unlock();
+    if (known_progress_ == static_cast<int64_t>(entries_.size()))
+        goto completed;
+
+    // else: something went wrong (some tasks failed); free the connection
+    client_conn_->free();
+    delete client_conn_;
+    client_conn_ = nullptr;
+    engine_->getCopyClient().freeCtrlBlock(tcp_ctrl_block_);
+    tcp_ctrl_block_ = nullptr;
+    return;
+
+completed:
+    // Tcp requests do not expect finalized value from socket
+    client_conn_->has_pending = false;
+    auto &copy_client = engine_->getCopyClient();
+    copy_client.freeConnection(client_conn_);
+    client_conn_ = nullptr;
+    copy_client.freeCtrlBlock(tcp_ctrl_block_);
+    tcp_ctrl_block_ = nullptr;
 }

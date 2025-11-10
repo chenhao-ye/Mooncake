@@ -81,8 +81,10 @@ class FlexBatch {
     // once this batch is considered done with the connection (no more progress
     // will be made), client_conn_ and xxx_ctrl_block_ will be set to nullptr.
     // - for RDMA-based copy, it requires seeing a progress that implies all
-    //   requests completed OR received a int32_t from the socket
-    // - for TCP-based copy, TODO: impl this
+    //   requests completed OR received a int32_t from the socket.
+    // - for TCP-based copy, it requires seeing a progress that implies all
+    //   requests completed OR notice the mutex on the ctrl block is available,
+    //   meaning the worker thread has finalized it.
     ClientConnection *client_conn_;
     int64_t known_progress_;
 

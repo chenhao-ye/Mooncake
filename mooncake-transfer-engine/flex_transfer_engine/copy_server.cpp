@@ -94,8 +94,19 @@ int CopyServer::unregisterLocalMemoryBatch(std::vector<uintptr_t> &addr_list) {
 /* TCP listener and worker thread functions */
 
 void CopyServer::startListener() {
+    // Determine the IP address to use for the server URL
+    bool use_ipv6 = true;
+    auto ip_list = findLocalIpv6Addresses();
+    if (ip_list.empty() || ip_list[0].empty()) {  // fallback to IPv4
+        use_ipv6 = false;
+        ip_list = findLocalIpv4Addresses();
+        if (ip_list.empty() || ip_list[0].empty())
+            throw std::runtime_error("Failed to find local IP addresses");
+    }
+    const std::string &server_ip = ip_list[0];
+
     // Use findAvailableTcpPort to find an available port
-    uint16_t tcp_port = findAvailableTcpPort(listener_fd_);
+    uint16_t tcp_port = findAvailableTcpPort(listener_fd_, use_ipv6);
     if (tcp_port == 0)
         throw std::runtime_error("Failed to find available TCP port");
 
@@ -108,22 +119,10 @@ void CopyServer::startListener() {
                                  strerror(errno));
     }
 
-    // Determine the IP address to use for the server URL
-    auto ip_list = findLocalIpAddresses();
-    if (ip_list.empty() || ip_list[0].empty())
-        throw std::runtime_error("Failed to find local IP addresses");
-    const std::string &server_ip = ip_list[0];
-
     // Set local_copy_server_url_
-    std::ostringstream oss;
-    // Check if the IP is IPv6 (contains ':')
-    bool is_ipv6 = (server_ip.find(':') != std::string::npos);
-    if (is_ipv6)
-        oss << "[" << server_ip << "]:" << tcp_port;
-    else
-        oss << server_ip << ":" << tcp_port;
-
-    local_copy_server_url_ = oss.str();
+    local_copy_server_url_ =
+        use_ipv6 ? ("[" + server_ip + "]:" + std::to_string(tcp_port))
+                 : (server_ip + ":" + std::to_string(tcp_port));
 
     std::cerr << "TCP listener started on " << local_copy_server_url_
               << std::endl;

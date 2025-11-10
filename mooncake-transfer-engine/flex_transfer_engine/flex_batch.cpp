@@ -54,6 +54,7 @@ void FlexBatch::addReadRequest(uintptr_t local_addr, uintptr_t remote_addr,
                            .target_offset = remote_addr,
                            .length = size});
 }
+
 void FlexBatch::addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
                                 uint64_t size) {
     entries_.emplace_back(
@@ -62,6 +63,17 @@ void FlexBatch::addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
                            .target_id = -1,  // will be set upon submit()
                            .target_offset = remote_addr,
                            .length = size});
+}
+
+void FlexBatch::addFetchAddRequest(uintptr_t local_addr, uintptr_t remote_addr,
+                                   uint64_t value) {
+    entries_.emplace_back(
+        transfer_request_t{.opcode = OPCODE_ATOMIC_FETCH_ADD,
+                           .source = reinterpret_cast<void *>(local_addr),
+                           .target_id = -1,  // will be set upon submit()
+                           .target_offset = remote_addr,
+                           // for fetch-add, .length is overloaded for operand
+                           .length = value});
 }
 
 int FlexBatch::submit(const std::string &target, bool is_direct,
@@ -143,7 +155,7 @@ void FlexBatch::checkRdmaProgress() {
         }
         return;
     }
-    // no new progress; check socket to see if finalized
+    /* no new progress; check socket to see if finalized */
 
     // check socket to see the server finalizes this connection
     nbytes = recv(client_conn_->fd, &finalized_value, sizeof(finalized_value),
@@ -152,7 +164,7 @@ void FlexBatch::checkRdmaProgress() {
     if (nbytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         return;  // the server did not finalize it
 
-    // finalized: either the server has finalized it OR something went wrong
+    /* finalized: either the server has finalized it OR something went wrong */
 
     // the server has finalized it
     if (nbytes == sizeof(finalized_value)) {

@@ -39,6 +39,8 @@ class FlexBatch {
                         uint64_t size);
     void addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
                          uint64_t size);
+    void addFetchAddRequest(uintptr_t local_addr, uintptr_t remote_addr,
+                            uint64_t value);
 
     /**
      * Submit the transfer batch.

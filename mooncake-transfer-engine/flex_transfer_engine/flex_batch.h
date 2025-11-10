@@ -26,9 +26,10 @@ class FlexBatch {
      */
     explicit FlexBatch(std::shared_ptr<FlexTransferEngine> engine)
         : engine_(std::move(engine)),
+          is_direct_(true),
           batch_id_(INVALID_BATCH),
           client_conn_(nullptr),
-          last_progress_(0),
+          known_progress_(0),
           rdma_ctrl_block_(nullptr),
           tcp_ctrl_block_(nullptr) {}
 
@@ -42,14 +43,14 @@ class FlexBatch {
     /**
      * Submit the transfer batch.
      *
-     * @param target Remote target, either Mooncake segment name or copy server
-     * URL (formatted as "ip:port").
-     * @param is_target_copy If true, target is a copy server URL; if false,
-     * target is a segment name.
-     * @param use_rdma If true, use RDMA; if false, use TCP. Only valid if
-     * is_target_copy is true (direct mode must use RDMA).
+     * @param target Remote target, either segment name or copy server URL
+     * (formatted as "ip:port").
+     * @param is_direct If true, issue direct EDMA-read, in which case target
+     * should be a segment name; otherwise, target is a copy server URL.
+     * @param use_rdma If true, use RDMA; if false, use TCP. Ignored if
+     * is_direct is true (direct mode must use RDMA).
      */
-    int submit(const std::string &target, bool is_target_copy = false,
+    int submit(const std::string &target, bool is_direct = true,
                bool use_rdma = true);
 
     /**
@@ -63,7 +64,7 @@ class FlexBatch {
     void free();
 
    private:
-    // read ctrl block and save progress into last_progress_
+    // read ctrl block and save progress into known_progress_
     void checkRdmaProgress();
     void checkTcpProgress();
 
@@ -71,21 +72,25 @@ class FlexBatch {
     std::shared_ptr<FlexTransferEngine> engine_;
     std::vector<transfer_request_t> entries_;
 
+    bool is_direct_;
+
     /* for direct transfer */
     batch_id_t batch_id_;
 
     /* for copy transfer */
     // once this batch is considered done with the connection (no more progress
-    // will be made), client_conn_ will be set to nullptr.
+    // will be made), client_conn_ and xxx_ctrl_block_ will be set to nullptr.
     // - for RDMA-based copy, it requires seeing a progress that implies all
     //   requests completed OR received a int32_t from the socket
     // - for TCP-based copy, TODO: impl this
     ClientConnection *client_conn_;
-    int64_t last_progress_;
+    int64_t known_progress_;
 
-    // if both nullptr, it is a direct RDMA transfer
     RdmaCopyCtrlBlock *rdma_ctrl_block_;
     TcpCopyCtrlBlock *tcp_ctrl_block_;
+
+    // only valid for copy-based transfer
+    bool isCopyFinalized() { return !client_conn_; }
 };
 
 struct MemoryBatch {

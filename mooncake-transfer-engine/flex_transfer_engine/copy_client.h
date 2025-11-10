@@ -66,6 +66,13 @@ class CopyClient {
     TcpCopyCtrlBlock *submitTcpRequests(
         ClientConnection *conn, std::vector<transfer_request_t> &entries);
 
+    void freeCtrlBlock(RdmaCopyCtrlBlock *ctrl_block) {
+        rdma_copy_backend_.freeCtrlBlock(ctrl_block);
+    }
+    void freeCtrlBlock(TcpCopyCtrlBlock *ctrl_block) {
+        tcp_copy_backend_.freeCtrlBlock(ctrl_block);
+    }
+
    private:
     void writeSegmentName(int fd);
     void writeRdmaRequests(int fd, std::vector<transfer_request_t> &entries,

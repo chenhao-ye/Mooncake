@@ -50,11 +50,11 @@ void CopyClient::freeConnection(ClientConnection *conn) {
     delete conn;
 }
 
-void CopyClient::submitRdmaRequests(std::vector<transfer_request_t> &entries,
-                                    ClientConnection *conn,
-                                    RdmaCopyCtrlBlock *ctrl_block) {
-    assert(ctrl_block);
-
+RdmaCopyCtrlBlock *CopyClient::submitRdmaRequests(
+    ClientConnection *conn, std::vector<transfer_request_t> &entries) {
+    RdmaCopyCtrlBlock *ctrl_block = rdma_copy_backend_.allocRdmaCopyCtrlBlock();
+    CopyMode mode = CopyMode::RDMA;
+    writeFully(conn->fd, &mode, sizeof(mode));
     writeSegmentName(conn->fd);
     writeRdmaRequests(conn->fd, entries, ctrl_block);
 
@@ -65,6 +65,16 @@ void CopyClient::submitRdmaRequests(std::vector<transfer_request_t> &entries,
     std::cerr << "Submitted " << entries.size() << " requests to CopyServer at "
               << conn->server_url << std::endl;
     conn->has_pending = true;
+    return ctrl_block;
+}
+
+TcpCopyCtrlBlock *CopyClient::submitTcpRequests(
+    ClientConnection *conn, std::vector<transfer_request_t> &entries) {
+    CopyMode mode = CopyMode::TCP;
+    writeFully(conn->fd, &mode, sizeof(mode));
+    writeTcpRequests(conn->fd, entries);
+    // TODO: implement this
+    return nullptr;
 }
 
 void CopyClient::writeSegmentName(int fd) {
@@ -108,6 +118,31 @@ void CopyClient::writeRdmaRequests(int fd,
     nbytes = writeFully(fd, reqs.data(), reqs_nbytes);
     if (nbytes != static_cast<ssize_t>(reqs_nbytes))
         throw std::runtime_error("Failed to send request info to CopyServer");
+}
+
+void CopyClient::writeTcpRequests(int fd,
+                                  std::vector<transfer_request_t> &entries) {
+    ssize_t nbytes;
+    TcpHeader header{.num_reqs = entries.size()};
+
+    nbytes = writeFully(fd, &header, sizeof(header));
+    if (nbytes != sizeof(header))
+        throw std::runtime_error("Failed to send TCP batch info to CopyServer");
+
+    std::vector<TcpReq> reqs;
+    reqs.reserve(entries.size());
+    for (const auto &entry : entries) {
+        assert(entry.opcode == OPCODE_READ || entry.opcode == OPCODE_WRITE);
+        reqs.emplace_back(reinterpret_cast<uint64_t>(entry.source),
+                          entry.target_offset, entry.length,
+                          static_cast<uint8_t>(entry.opcode));
+    }
+    size_t reqs_nbytes = sizeof(TcpReq) * reqs.size();
+
+    nbytes = writeFully(fd, reqs.data(), reqs_nbytes);
+    if (nbytes != static_cast<ssize_t>(reqs_nbytes))
+        throw std::runtime_error(
+            "Failed to send TCP request info to CopyServer");
 }
 
 int CopyClient::connectToCopyServer(const std::string &server_url) {

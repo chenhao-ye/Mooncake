@@ -7,8 +7,49 @@
 #include "flex_transfer_engine.h"
 
 void RdmaCopyBackend::cleanup() {
+    {
+        std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
+        for (RdmaCopyCtrlBlock *ctrl_block : ctrl_block_cache_) {
+            ::unregisterLocalMemory(engine_.getEngine(), ctrl_block);
+            delete ctrl_block;
+        }
+        ctrl_block_cache_.clear();
+    }
     for (auto pair : buffer_pool_) freeBufferPair(pair);
     buffer_pool_.clear();
+}
+
+RdmaCopyCtrlBlock *RdmaCopyBackend::allocRdmaCopyCtrlBlock() {
+    std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
+
+    // Try to get from cache first
+    if (!ctrl_block_cache_.empty()) {
+        RdmaCopyCtrlBlock *ctrl_block = ctrl_block_cache_.back();
+        ctrl_block_cache_.pop_back();
+        ctrl_block->progress_counter.store(0, std::memory_order_release);
+        return ctrl_block;
+    }
+
+    // Cache is empty, allocate a new one
+    RdmaCopyCtrlBlock *ctrl_block = new RdmaCopyCtrlBlock();
+
+    // Register it with RDMA using the specified location
+    int rc = ::registerLocalMemory(engine_.getEngine(), ctrl_block,
+                                   sizeof(RdmaCopyCtrlBlock),
+                                   ctrl_block_location_.c_str(),
+                                   /*remote_accessible*/ true,
+                                   /*remote_atomic*/ true);
+    if (rc) {
+        delete ctrl_block;
+        return nullptr;
+    }
+    return ctrl_block;
+}
+
+void RdmaCopyBackend::freeRdmaCopyCtrlBlock(RdmaCopyCtrlBlock *ctrl_block) {
+    if (!ctrl_block) return;
+    std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
+    ctrl_block_cache_.emplace_back(ctrl_block);
 }
 
 int RdmaCopyBackend::prepareBufferPair(LocId loc_id,
@@ -141,8 +182,7 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     Task &task = tasks[task_idx];
     // delayed source address validation:
     // if source_addr is invalid, will be detected here
-    Region *region =
-        region_mgr_.getRegion(task.source_addr, task.length);
+    Region *region = region_mgr_.getRegion(task.source_addr, task.length);
     if (!region) {
         std::cerr << "Source address 0x" << std::hex << task.source_addr
                   << " not in registered copiable regions" << std::endl;

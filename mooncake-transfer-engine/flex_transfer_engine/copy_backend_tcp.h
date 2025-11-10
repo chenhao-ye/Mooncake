@@ -17,6 +17,10 @@
 
 class FlexTransferEngine;
 
+struct TcpCopyCtrlBlock {
+    std::atomic_int64_t progress_counter = 0;
+};
+
 class TcpCopyBackend {
    public:
     struct Task {

@@ -18,14 +18,15 @@ void FlexBatch::free() {
         ::freeBatchID(engine_->getEngine(), batch_id_);
         batch_id_ = INVALID_BATCH;
     }
-    if (ctrl_block_) {
-        engine_->freeRdmaCopyCtrlBlock(ctrl_block_);
-        ctrl_block_ = nullptr;
-    }
     if (client_conn_) {
         engine_->getCopyClient().freeConnection(client_conn_);
         client_conn_ = nullptr;
     }
+    // TODO: free ctrl blocks
+    // if (ctrl_block_) {
+    //     engine_->freeRdmaCopyCtrlBlock(ctrl_block_);
+    //     ctrl_block_ = nullptr;
+    // }
 }
 
 void FlexBatch::addReadRequest(uintptr_t local_addr, uintptr_t remote_addr,
@@ -67,16 +68,16 @@ int FlexBatch::submit(const std::string &target, bool is_target_copy,
     auto &copy_client = engine_->getCopyClient();
     client_conn_ = copy_client.allocConnection(target);
     if (use_rdma) {
-        ctrl_block_ = engine_->allocRdmaCopyCtrlBlock();
-        copy_client.submitRdmaRequests(entries_, client_conn_, ctrl_block_);
+        rdma_ctrl_block_ =
+            copy_client.submitRdmaRequests(client_conn_, entries_);
     } else {
-        // TODO: add TCP support
+        tcp_ctrl_block_ = copy_client.submitTcpRequests(client_conn_, entries_);
     }
     return 0;
 }
 
 int FlexBatch::getTransferStatus(size_t task_id) {
-    if (!ctrl_block_) {  // Direct RDMA transfer
+    if (!rdma_ctrl_block_ && !tcp_ctrl_block_) {  // Direct RDMA transfer
         transfer_status_t status;
         int rc = ::getTransferStatus(engine_->getEngine(), batch_id_, task_id,
                                      &status);
@@ -86,23 +87,36 @@ int FlexBatch::getTransferStatus(size_t task_id) {
 
     if (static_cast<int64_t>(task_id) < last_progress_) return STATUS_COMPLETED;
 
-    // if client_conn_ is nullptr, it means this batch has been finalized, no
-    // more progress will be made
+    // it has been finalized, so no more progress will be made
     if (!client_conn_) return STATUS_FAILED;
 
-    int64_t progress =
-        ctrl_block_->progress_counter.load(std::memory_order_acquire);
-    assert(progress >= last_progress_);
-    if (progress > last_progress_) {
-        last_progress_ = progress;
+    if (rdma_ctrl_block_) checkRdmaProgress();
+    // TODO: else: checkTcpProgress();
+
+    if (static_cast<int64_t>(task_id) < last_progress_) return STATUS_COMPLETED;
+
+    // if finalized, all non-completed task are failed
+    return client_conn_ ? STATUS_WAITING : STATUS_FAILED;
+}
+
+// read from rdma_ctrl_block_ and update last_progress_
+// if it is finalized, free client_conn_
+void FlexBatch::checkRdmaProgress() {
+    int64_t prev_progress = last_progress_;
+    last_progress_ =
+        rdma_ctrl_block_->progress_counter.load(std::memory_order_acquire);
+    assert(last_progress_ >= prev_progress);
+    if (last_progress_ > prev_progress) {  // new progress made
         if (last_progress_ == static_cast<int64_t>(entries_.size())) {
-            // all done; finalize it (but keep pending=True)
+            // all done; finalize it (but keep pending=True because we didn't
+            // pop the finalized value yet from the socket)
+            assert(client_conn_->has_pending);
             engine_->getCopyClient().freeConnection(client_conn_);
             client_conn_ = nullptr;
         }
-        return static_cast<int64_t>(task_id) < progress ? STATUS_COMPLETED
-                                                        : STATUS_WAITING;
+        return;
     }
+    // no new progress; check socket to see if finalized
 
     // check socket to see the server finalizes this connection
     uint32_t finalized_value = 0;
@@ -110,17 +124,19 @@ int FlexBatch::getTransferStatus(size_t task_id) {
                           sizeof(finalized_value), MSG_DONTWAIT);
 
     if (nbytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-        return STATUS_WAITING;  // the server didn't finalize it
+        return;  // the server did not finalize it
 
-    // finalized this batch: either the server has finalized it OR something
-    // went wrong
+    // finalized: either the server has finalized it OR something went wrong
+
+    // the server has finalized it
     if (nbytes == sizeof(finalized_value)) {
         last_progress_ = finalized_value;
         if (last_progress_ == static_cast<int64_t>(entries_.size())) {
             // all done; finalize it and mark it with no pending
             client_conn_->has_pending = false;
             engine_->getCopyClient().freeConnection(client_conn_);
-            goto check_last;
+            client_conn_ = nullptr;
+            return;
         }
     }
 
@@ -131,12 +147,4 @@ int FlexBatch::getTransferStatus(size_t task_id) {
     client_conn_->free();
     delete client_conn_;
     client_conn_ = nullptr;
-
-    // make one last check, just in case it happend during recv()
-    last_progress_ =
-        ctrl_block_->progress_counter.load(std::memory_order_acquire);
-
-check_last:
-    return static_cast<int64_t>(task_id) < last_progress_ ? STATUS_COMPLETED
-                                                          : STATUS_FAILED;
 }

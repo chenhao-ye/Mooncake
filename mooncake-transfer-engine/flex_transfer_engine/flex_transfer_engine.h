@@ -111,13 +111,8 @@ class FlexTransferEngine {
 
     segment_id_t getSegmentId(const std::string &segment_name);
 
-    RdmaCopyCtrlBlock *allocRdmaCopyCtrlBlock();
-
-    void freeRdmaCopyCtrlBlock(RdmaCopyCtrlBlock *ctrl_block);
-
    private:
     const bool enable_copy_;  // Whether to enable copy-based transfer
-    const std::string ctrl_block_location_;
 
     transfer_engine_t engine_;
 
@@ -126,10 +121,6 @@ class FlexTransferEngine {
     // Append-only; will never remove entries
     std::unordered_map<std::string, segment_id_t> segment_cache_;
     std::mutex segment_cache_mutex_;
-
-    // Cache of RdmaCopyCtrlBlock objects for copy-based transfers
-    std::vector<RdmaCopyCtrlBlock *> ctrl_block_cache_;
-    std::mutex ctrl_block_mutex_;
 
     RegionMgr region_mgr_;
 

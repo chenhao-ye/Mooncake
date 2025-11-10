@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -15,8 +16,17 @@
 
 class FlexTransferEngine;
 
+/**
+ * Used by both CopyClient and CopyServer. Must register with remote_atomic.
+ */
+struct RdmaCopyCtrlBlock {
+    volatile std::atomic_int64_t progress_counter = 0;
+    uint64_t padding[7];
+};
+static_assert(sizeof(RdmaCopyCtrlBlock) == 64,
+              "RdmaCopyCtrlBlock must be cacheline-aligned");
+
 class RdmaCopyBackend {
-   private:
     struct BufferPair {
         // buffers[0] is first half, buffers[1] is second half
         // buffers[0] is also the base address of allocation
@@ -92,36 +102,58 @@ class RdmaCopyBackend {
               buffer_idx(-1) {}
     };
 
+   private:
+    FlexTransferEngine &engine_;  // Back pointer to FlexTransferEngine
+    RegionMgr &region_mgr_;
+    const std::string ctrl_block_location_;
+
    public:
-    RdmaCopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr)
-        : engine_(engine), region_mgr_(region_mgr) {}
+    RdmaCopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr,
+                    const std::string &ctrl_block_location)
+        : engine_(engine),
+          region_mgr_(region_mgr),
+          ctrl_block_location_(ctrl_block_location) {}
     ~RdmaCopyBackend() { cleanup(); }
 
+    // Require regions_mutex_
     // Ensure that a buffer pair is ready for the given location with at least
     // the given length
     int prepareBufferPair(LocId loc_id, const std::string &location,
                           size_t length);
 
+    // Require regions_mutex_
     // Process RDMA transfer requests
     // Return 0 for success; non-zero for error; update num_done
     int processRequest(segment_id_t target_segment_id,
                        uint64_t target_progress_addr, std::vector<Task> &tasks,
                        RdmaCopyCtrlBlock *ctrl_block, int32_t &num_done);
 
+    // Require regions_mutex_
     void cleanup();
 
-   private:
+   public: /* Resource pools: ctrl blocks and buffer pairs */
+    RdmaCopyCtrlBlock *allocRdmaCopyCtrlBlock();
+    void freeRdmaCopyCtrlBlock(RdmaCopyCtrlBlock *ctrl_block);
+
     // Require regions_mutex_ to be held before calling
     // When this function is called, there MUST be a buffer pair ready with the
     // proper length (which should have been set up upon registration)
-    BufferPair &getBufferPair(LocId loc_id) { return *buffer_pool_[loc_id.idx]; }
-
+    BufferPair &getBufferPair(LocId loc_id) {
+        return *buffer_pool_[loc_id.idx];
+    }
     // Require regions_mutex_ to be held before calling
     BufferPair *allocBufferPair(LocId loc_id, const std::string &location,
                                 size_t size);
     // Require regions_mutex_ to be held before calling
     void freeBufferPair(BufferPair *pair);
 
+   private:
+    std::vector<RdmaCopyCtrlBlock *> ctrl_block_cache_;
+    std::mutex ctrl_block_mutex_;
+
+    std::vector<BufferPair *> buffer_pool_;  // BufferPair per location
+
+   private: /* Helper functions for task execution */
     // Copy memory from src to dst; handle both CPU and CUDA memory
     // For CUDA memory, uses async copy with the stream from buffer_pair
     void copyMemory(void *dst, const void *src, size_t size,
@@ -159,11 +191,4 @@ class RdmaCopyBackend {
     // Wait until the given batch (size=1) is done and then free the batch; will
     // update batch_id to INVALID_BATCH; return the status
     int waitBatch(batch_id_t &batch_id);
-
-    // Back pointer to FlexTransferEngine
-    FlexTransferEngine &engine_;
-    // Reference to RegionMgr for region lookups
-    RegionMgr &region_mgr_;
-    // Buffer pool per location (LocId -> buffer pair)
-    std::vector<BufferPair *> buffer_pool_;
 };

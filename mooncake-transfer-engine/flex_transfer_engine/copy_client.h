@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "copy_backend_rdma.h"
 #include "copy_backend_tcp.h"
 #include "copy_common.h"
 #include "transfer_engine_c.h"
@@ -48,8 +49,10 @@ struct ClientConnection {
 class CopyClient {
    public:
     CopyClient(const std::string local_segment_name,
+               RdmaCopyBackend &rdma_copy_backend,
                TcpCopyBackend &tcp_copy_backend)
         : local_segment_name_(local_segment_name),
+          rdma_copy_backend_(rdma_copy_backend),
           tcp_copy_backend_(tcp_copy_backend) {}
     ~CopyClient();
 
@@ -57,21 +60,17 @@ class CopyClient {
 
     void freeConnection(ClientConnection *conn);
 
-    /**
-     * Submit a batch of transfer requests to a remote CopyServer.
-     * @param entries Vector of transfer requests
-     * @param conn Connect to submit requests to
-     * @param ctrl_block Control block for progress tracking
-     * @return connection pointer
-     */
-    void submitRdmaRequests(std::vector<transfer_request_t> &entries,
-                            ClientConnection *conn,
-                            RdmaCopyCtrlBlock *ctrl_block);
+    RdmaCopyCtrlBlock *submitRdmaRequests(
+        ClientConnection *conn, std::vector<transfer_request_t> &entries);
+
+    TcpCopyCtrlBlock *submitTcpRequests(
+        ClientConnection *conn, std::vector<transfer_request_t> &entries);
 
    private:
     void writeSegmentName(int fd);
     void writeRdmaRequests(int fd, std::vector<transfer_request_t> &entries,
                            RdmaCopyCtrlBlock *ctrl_block);
+    void writeTcpRequests(int fd, std::vector<transfer_request_t> &entries);
 
     /**
      * Connect to a remote CopyServer.
@@ -83,6 +82,7 @@ class CopyClient {
     // Let the remote CopyServer know where to submit RDMA write
     const std::string local_segment_name_;
 
+    RdmaCopyBackend &rdma_copy_backend_;
     TcpCopyBackend &tcp_copy_backend_;
 
     // Cached TCP connections to remote CopyServers (server_url -> connection)

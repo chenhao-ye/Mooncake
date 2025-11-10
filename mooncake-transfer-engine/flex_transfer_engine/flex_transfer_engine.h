@@ -75,14 +75,20 @@ class FlexTransferEngine {
      * Constructor.
      * @param metadata_conn_string Connection string for metadata server
      * @param local_server_name Local server name
-     * @param enable_copy If true, starts TCP listener for copy-based transfers
      * @param ctrl_block_location Location for RdmaCopyCtrlBlock registration
      * (e.g., "cpu:0")
+     * @param copy_server_enabled If true, starts TCP listener for copy-based
+     * transfer; otherwise, only direct RDMA transfer is supported.
+     * @param default_reg_mode Default registration mode when RegMode::Auto is
+     * provided for (un)registerLocalMemory(Batch); if RegMode::Auto is provided
+     * here, will infer: copy_server_enabled ? RegMode::Copy : RegMode::Direct.
+     * This is desired if no TCP copy transfer is expected.
      */
     explicit FlexTransferEngine(const std::string &metadata_conn_string,
                                 const std::string &local_server_name,
-                                bool enable_copy,
-                                const std::string &ctrl_block_location);
+                                const std::string &ctrl_block_location,
+                                bool copy_server_enabled,
+                                RegMode default_reg_mode = RegMode::Auto);
 
     ~FlexTransferEngine();
 
@@ -127,6 +133,7 @@ class FlexTransferEngine {
     // if disabled, the memory register with RegMode::Copy can only be used
     // for CopyClient.
     const bool copy_server_enabled_;
+    const RegMode default_reg_mode_;
 
     transfer_engine_t engine_;
 

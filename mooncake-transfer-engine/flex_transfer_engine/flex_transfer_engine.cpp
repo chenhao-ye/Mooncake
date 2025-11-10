@@ -27,9 +27,14 @@
 
 FlexTransferEngine::FlexTransferEngine(const std::string &metadata_conn_string,
                                        const std::string &local_server_name,
-                                       bool enable_copy,
-                                       const std::string &ctrl_block_location)
-    : copy_server_enabled_(enable_copy),
+                                       const std::string &ctrl_block_location,
+                                       bool copy_server_enabled,
+                                       RegMode default_reg_mode)
+    : copy_server_enabled_(copy_server_enabled),
+      default_reg_mode_(
+          default_reg_mode == RegMode::Auto
+              ? (copy_server_enabled ? RegMode::Copy : RegMode::Direct)
+              : default_reg_mode),
       region_mgr_(),
       rdma_copy_backend_(*this, region_mgr_, ctrl_block_location),
       tcp_copy_backend_(*this, region_mgr_),
@@ -75,8 +80,7 @@ int FlexTransferEngine::registerLocalMemory(uintptr_t addr, size_t length,
                                             const std::string &location,
                                             bool remote_accessible,
                                             bool remote_atomic, RegMode mode) {
-    if (mode == RegMode::Auto)
-        mode = copy_server_enabled_ ? RegMode::Copy : RegMode::Direct;
+    if (mode == RegMode::Auto) mode = default_reg_mode_;
     int rc = 0;
     if (mode & RegMode::Direct) {  // do actual RDMA registration
         rc = ::registerLocalMemory(engine_, reinterpret_cast<void *>(addr),
@@ -104,8 +108,7 @@ int FlexTransferEngine::registerLocalMemory(uintptr_t addr, size_t length,
 }
 
 int FlexTransferEngine::unregisterLocalMemory(uintptr_t addr, RegMode mode) {
-    if (mode == RegMode::Auto)
-        mode = copy_server_enabled_ ? RegMode::Copy : RegMode::Direct;
+    if (mode == RegMode::Auto) mode = default_reg_mode_;
 
     // Note if an address is registered multiple times, direct mode will expect
     // the exact number of unregister but the copy mode only expect one.
@@ -133,8 +136,7 @@ int FlexTransferEngine::unregisterLocalMemory(uintptr_t addr, RegMode mode) {
 int FlexTransferEngine::registerLocalMemoryBatch(
     std::vector<buffer_entry_t> &buffer_list, const std::string &location,
     RegMode mode) {
-    if (mode == RegMode::Auto)
-        mode = copy_server_enabled_ ? RegMode::Copy : RegMode::Direct;
+    if (mode == RegMode::Auto) mode = default_reg_mode_;
 
     int rc = 0;
     if (mode & RegMode::Direct) {
@@ -171,8 +173,7 @@ int FlexTransferEngine::registerLocalMemoryBatch(
 
 int FlexTransferEngine::unregisterLocalMemoryBatch(
     std::vector<uintptr_t> &addr_list, RegMode mode) {
-    if (mode == RegMode::Auto)
-        mode = copy_server_enabled_ ? RegMode::Copy : RegMode::Direct;
+    if (mode == RegMode::Auto) mode = default_reg_mode_;
 
     // Note if an address is registered multiple times, direct mode will expect
     // the exact number of unregister but the copy mode only expect one.

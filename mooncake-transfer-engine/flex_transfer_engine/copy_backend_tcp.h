@@ -3,8 +3,11 @@
 #include <sys/types.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "copy_common.h"
@@ -16,12 +19,12 @@
 #endif
 
 class FlexTransferEngine;
-
-struct TcpCopyCtrlBlock {
-    std::atomic_int64_t progress_counter = 0;
-};
+class TcpCopyBackend;
+struct TcpCopyCtrlBlock;
 
 class TcpCopyBackend {
+    struct BufferPair;  // forward declaration
+
    public:
     struct Task {
         void *addr;
@@ -32,9 +35,18 @@ class TcpCopyBackend {
             : addr(addr), length(length), region(nullptr) {}
     };
 
+   private:
+    FlexTransferEngine &engine_;
+    RegionMgr &region_mgr_;
+
    public:
     TcpCopyBackend(FlexTransferEngine &engine, RegionMgr &region_mgr);
     ~TcpCopyBackend() { cleanup(); }
+
+    TcpCopyBackend(const TcpCopyBackend &) = delete;
+    TcpCopyBackend(TcpCopyBackend &&) = delete;
+    TcpCopyBackend &operator=(const TcpCopyBackend &) = delete;
+    TcpCopyBackend &operator=(TcpCopyBackend &&) = delete;
 
     int processRequest(int client_fd, std::vector<Task> &tasks);
 
@@ -43,27 +55,15 @@ class TcpCopyBackend {
 
     void cleanup();
 
+   public: /* Resource pools: ctrl blocks and buffer pairs */
+    TcpCopyCtrlBlock *allocCtrlBlock();
+    void freeCtrlBlock(TcpCopyCtrlBlock *ctrl_block);
+
    private:
-#ifdef USE_CUDA
-    struct BufferPair {
-        // Fixed buffer size for chunked transfers (only needed for CUDA)
-        static constexpr size_t kBufferSize = 2 * 1024 * 1024;  // 2 MB
+    std::vector<TcpCopyCtrlBlock *> ctrl_block_cache_;
+    std::mutex ctrl_block_mutex_;
 
-        // buffers[0] and buffers[1] are separate pinned host memory buffers
-        char *buffers[2];
-        // Each buffer has its own CUDA stream
-        cudaStream_t streams[2];
-
-        BufferPair();
-        ~BufferPair();
-
-        BufferPair(const BufferPair &) = delete;
-        BufferPair(BufferPair &&) = delete;
-        BufferPair &operator=(const BufferPair &) = delete;
-        BufferPair &operator=(BufferPair &&) = delete;
-    };
-#endif
-
+   private:
     // Helper structure to represent a single chunk within the pipeline
     struct ChunkIter {
         void *addr{nullptr};
@@ -94,10 +94,46 @@ class TcpCopyBackend {
 
 #endif
 
-    FlexTransferEngine &engine_;
-    RegionMgr &region_mgr_;
-
+   private:
+    /* BufferPair definition */
 #ifdef USE_CUDA
+    struct BufferPair {
+        // Fixed buffer size for chunked transfers (only needed for CUDA)
+        static constexpr size_t kBufferSize = 2 * 1024 * 1024;  // 2 MB
+
+        // buffers[0] and buffers[1] are separate pinned host memory buffers
+        char *buffers[2];
+        // Each buffer has its own CUDA stream
+        cudaStream_t streams[2];
+
+        BufferPair();
+        ~BufferPair();
+        BufferPair(const BufferPair &) = delete;
+        BufferPair(BufferPair &&) = delete;
+        BufferPair &operator=(const BufferPair &) = delete;
+        BufferPair &operator=(BufferPair &&) = delete;
+    };
+
     BufferPair *buffer_pair_;
 #endif
+};
+
+struct TcpCopyCtrlBlock {
+    // update these fields when using the ctrl block
+    std::atomic_int64_t progress_counter = 0;
+    int server_fd = -1;  // only >= 0 means has work
+    std::vector<TcpCopyBackend::Task> tasks;
+
+    // Thread and synchronization primitives for async processing
+    std::thread worker_thread_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool worker_running_ = true;  // does not need atomic, protected by mutex
+
+    TcpCopyCtrlBlock(TcpCopyBackend &backend);
+
+   private:
+    TcpCopyBackend &backend_;
+
+    static void workerThreadFunc(TcpCopyCtrlBlock *);  // start upon ctor
 };

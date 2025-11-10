@@ -11,14 +11,17 @@
 #include <cstddef>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 
+#include "copy_backend_tcp.h"
 #include "copy_common.h"
 #include "flex_transfer_engine.h"
 #include "util.h"
 
 CopyClient::~CopyClient() {
-    for (const auto &[_, conn] : connection_cache_)
+    for (const auto &[_, conn] : connection_cache_) {
         if (conn) conn->free();
+    }
 }
 
 ClientConnection *CopyClient::allocConnection(const std::string &server_url) {
@@ -52,7 +55,7 @@ void CopyClient::freeConnection(ClientConnection *conn) {
 
 RdmaCopyCtrlBlock *CopyClient::submitRdmaRequests(
     ClientConnection *conn, std::vector<transfer_request_t> &entries) {
-    RdmaCopyCtrlBlock *ctrl_block = rdma_copy_backend_.allocRdmaCopyCtrlBlock();
+    RdmaCopyCtrlBlock *ctrl_block = rdma_copy_backend_.allocCtrlBlock();
     CopyMode mode = CopyMode::RDMA;
     writeFully(conn->fd, &mode, sizeof(mode));
     writeSegmentName(conn->fd);
@@ -70,11 +73,20 @@ RdmaCopyCtrlBlock *CopyClient::submitRdmaRequests(
 
 TcpCopyCtrlBlock *CopyClient::submitTcpRequests(
     ClientConnection *conn, std::vector<transfer_request_t> &entries) {
+    TcpCopyCtrlBlock *ctrl_block = tcp_copy_backend_.allocCtrlBlock();
     CopyMode mode = CopyMode::TCP;
     writeFully(conn->fd, &mode, sizeof(mode));
     writeTcpRequests(conn->fd, entries);
-    // TODO: implement this
-    return nullptr;
+    {
+        std::lock_guard<std::mutex> lock(ctrl_block->mutex_);
+        ctrl_block->server_fd = conn->fd;
+        ctrl_block->tasks.clear();
+        ctrl_block->tasks.reserve(entries.size());
+        for (const auto &entry : entries)
+            ctrl_block->tasks.emplace_back(entry.source, entry.length);
+    }
+    ctrl_block->cv_.notify_one();
+    return ctrl_block;
 }
 
 void CopyClient::writeSegmentName(int fd) {
@@ -109,7 +121,9 @@ void CopyClient::writeRdmaRequests(int fd,
     std::vector<RdmaReq> reqs;
     reqs.reserve(entries.size());
     for (const auto &entry : entries) {
-        assert(entry.opcode == OPCODE_READ);
+        if (entry.opcode != OPCODE_READ)
+            throw std::invalid_argument(
+                "Only read operations are supported in copy mode");
         reqs.emplace_back(reinterpret_cast<uint64_t>(entry.source),
                           entry.target_offset, entry.length);
     }
@@ -132,10 +146,10 @@ void CopyClient::writeTcpRequests(int fd,
     std::vector<TcpReq> reqs;
     reqs.reserve(entries.size());
     for (const auto &entry : entries) {
-        assert(entry.opcode == OPCODE_READ || entry.opcode == OPCODE_WRITE);
-        reqs.emplace_back(reinterpret_cast<uint64_t>(entry.source),
-                          entry.target_offset, entry.length,
-                          static_cast<uint8_t>(entry.opcode));
+        if (entry.opcode != OPCODE_READ)
+            throw std::invalid_argument(
+                "Only read operations are supported in copy mode");
+        reqs.emplace_back(entry.target_offset, entry.length);
     }
     size_t reqs_nbytes = sizeof(TcpReq) * reqs.size();
 

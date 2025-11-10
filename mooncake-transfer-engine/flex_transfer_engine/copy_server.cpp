@@ -325,7 +325,7 @@ int CopyServer::processRdmaRequest(int client_fd) {
         goto cleanup;
     }
 
-    ctrl_block = rdma_copy_backend_.allocRdmaCopyCtrlBlock();
+    ctrl_block = rdma_copy_backend_.allocCtrlBlock();
     if (!ctrl_block) {
         std::cerr << "Failed to acquire RdmaCopyCtrlBlock" << std::endl;
         goto cleanup;
@@ -340,7 +340,7 @@ int CopyServer::processRdmaRequest(int client_fd) {
     }
 
 cleanup:
-    if (ctrl_block) rdma_copy_backend_.freeRdmaCopyCtrlBlock(ctrl_block);
+    if (ctrl_block) rdma_copy_backend_.freeCtrlBlock(ctrl_block);
 
     // Send completion count via socket (i.e., num_done)
     // If this fails, the connection should be closed

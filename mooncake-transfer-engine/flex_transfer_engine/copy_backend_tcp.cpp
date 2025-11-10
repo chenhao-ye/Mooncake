@@ -55,12 +55,49 @@ TcpCopyBackend::TcpCopyBackend(FlexTransferEngine &engine,
 }
 
 void TcpCopyBackend::cleanup() {
+    {  // shutdown all worker threads and clean up ctrl blocks
+        std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
+        for (auto *ctrl_block : ctrl_block_cache_) {
+            {  // Signal thread to shutdown
+                std::lock_guard<std::mutex> ctrl_block_lock(ctrl_block->mutex_);
+                ctrl_block->worker_running_ = false;
+            }
+            ctrl_block->cv_.notify_one();
+        }
+        for (auto *ctrl_block : ctrl_block_cache_) {
+            if (ctrl_block->worker_thread_.joinable())
+                ctrl_block->worker_thread_.join();
+            delete ctrl_block;
+        }
+        ctrl_block_cache_.clear();
+    }
+
 #ifdef USE_CUDA
     if (buffer_pair_) {
         delete buffer_pair_;
         buffer_pair_ = nullptr;
     }
 #endif
+}
+
+TcpCopyCtrlBlock *TcpCopyBackend::allocCtrlBlock() {
+    std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
+
+    TcpCopyCtrlBlock *ctrl_block = nullptr;
+    if (!ctrl_block_cache_.empty()) {
+        ctrl_block = ctrl_block_cache_.back();
+        ctrl_block_cache_.pop_back();
+    } else {  // empty cache; allocate new ctrl block
+        ctrl_block = new TcpCopyCtrlBlock(*this);
+    }
+    // the caller should acquire the mutex and initialize fields
+    return ctrl_block;
+}
+
+void TcpCopyBackend::freeCtrlBlock(TcpCopyCtrlBlock *ctrl_block) {
+    if (!ctrl_block) return;
+    std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
+    ctrl_block_cache_.emplace_back(ctrl_block);
 }
 
 bool TcpCopyBackend::getNextChunk(TaskIter &task_iter, std::vector<Task> &tasks,
@@ -349,4 +386,29 @@ int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks) {
     std::cerr << "Completed TCP transfer response: received " << tasks.size()
               << " tasks" << std::endl;
     return 0;
+}
+
+TcpCopyCtrlBlock::TcpCopyCtrlBlock(TcpCopyBackend &backend)
+    : progress_counter(0),
+      server_fd(-1),
+      worker_running_(true),
+      backend_(backend) {
+    worker_thread_ = std::thread(workerThreadFunc, this);
+}
+
+void TcpCopyCtrlBlock::workerThreadFunc(TcpCopyCtrlBlock *ctrl_block) {
+    std::unique_lock<std::mutex> lock(ctrl_block->mutex_);
+    while (true) {
+        ctrl_block->cv_.wait(lock, [ctrl_block]() {
+            return !ctrl_block->worker_running_ || ctrl_block->server_fd >= 0;
+        });
+        if (!ctrl_block->worker_running_) break;
+        ctrl_block->backend_.processResponse(ctrl_block->server_fd,
+                                             ctrl_block->tasks);
+        // reset all fields to indicate done
+        ctrl_block->server_fd = -1;
+        int64_t num_done = ctrl_block->tasks.size();
+        ctrl_block->tasks.clear();
+        ctrl_block->progress_counter.store(num_done, std::memory_order_release);
+    }
 }

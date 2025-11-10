@@ -19,7 +19,7 @@ void RdmaCopyBackend::cleanup() {
     buffer_pool_.clear();
 }
 
-RdmaCopyCtrlBlock *RdmaCopyBackend::allocRdmaCopyCtrlBlock() {
+RdmaCopyCtrlBlock *RdmaCopyBackend::allocCtrlBlock() {
     std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
 
     // Try to get from cache first
@@ -46,7 +46,7 @@ RdmaCopyCtrlBlock *RdmaCopyBackend::allocRdmaCopyCtrlBlock() {
     return ctrl_block;
 }
 
-void RdmaCopyBackend::freeRdmaCopyCtrlBlock(RdmaCopyCtrlBlock *ctrl_block) {
+void RdmaCopyBackend::freeCtrlBlock(RdmaCopyCtrlBlock *ctrl_block) {
     if (!ctrl_block) return;
     std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
     ctrl_block_cache_.emplace_back(ctrl_block);

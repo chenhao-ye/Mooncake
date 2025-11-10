@@ -24,7 +24,7 @@ void FlexBatch::free() {
     }
     // TODO: free ctrl blocks
     // if (ctrl_block_) {
-    //     engine_->freeRdmaCopyCtrlBlock(ctrl_block_);
+    //     engine_->freeCtrlBlock(ctrl_block_);
     //     ctrl_block_ = nullptr;
     // }
 }

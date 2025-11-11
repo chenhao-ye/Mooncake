@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <glog/logging.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -66,8 +67,8 @@ RdmaCopyCtrlBlock *CopyClient::submitRdmaRequests(
     // and update the progress counter via RDMA writes. The caller should
     // poll the progress to check completion.
 
-    std::cerr << "Submitted " << entries.size() << " requests to CopyServer at "
-              << conn->server_url << std::endl;
+    LOG(INFO) << "Submitted " << entries.size() << " requests to CopyServer at "
+              << conn->server_url;
     conn->has_pending = true;
     return ctrl_block;
 }
@@ -222,6 +223,6 @@ int CopyClient::connectToCopyServer(const std::string &server_url) {
 
     if (fd < 0) throw std::runtime_error("Failed to connect to " + server_url);
 
-    std::cerr << "Connected to CopyServer at " << server_url << std::endl;
+    LOG(INFO) << "Connected to CopyServer at " << server_url;
     return fd;
 }

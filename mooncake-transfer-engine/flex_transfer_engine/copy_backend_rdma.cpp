@@ -1,5 +1,7 @@
 #include "copy_backend_rdma.h"
 
+#include <glog/logging.h>
+
 #include <cassert>
 #include <cstring>
 #include <iostream>
@@ -66,8 +68,8 @@ int RdmaCopyBackend::prepareBufferPair(LocId loc_id,
         pair = allocBufferPair(loc_id, location, length);
         buffer_pool_[loc_id.idx] = pair;
         if (!pair) return -1;
-        std::cerr << "Allocated buffer pair of size " << length
-                  << " for location " << location << std::endl;
+        LOG(INFO) << "Allocated buffer pair of size " << length
+                  << " for location " << location;
     }
     return 0;
 }
@@ -105,8 +107,7 @@ int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
                 if (status == STATUS_WAITING) break;
                 freeBatch(tasks[i].batch_id);
                 if (status != STATUS_COMPLETED) {
-                    std::cerr << "Transfer error for task_idx=" << task_idx
-                              << std::endl;
+                    LOG(ERROR) << "Transfer error for task_idx=" << task_idx;
                     goto cleanup;
                 }
             }
@@ -118,7 +119,7 @@ int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
                 progress_batch_id, last_updated_num_done, num_done, ctrl_block,
                 target_segment_id, target_progress_addr);
             if (rc) {
-                std::cerr << "Fail to update the progress" << std::endl;
+                LOG(ERROR) << "Fail to update the progress";
                 goto cleanup;
             }
         }
@@ -129,8 +130,7 @@ int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
     for (size_t task_idx = num_done; task_idx < tasks.size(); ++task_idx) {
         status = waitTask(tasks[task_idx]);
         if (status != STATUS_COMPLETED) {
-            std::cerr << "Transfer error for task_idx=" << task_idx
-                      << std::endl;
+            LOG(ERROR) << "Transfer error for task_idx=" << task_idx;
             goto cleanup;
         }
         ++num_done;
@@ -147,8 +147,7 @@ int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
     if (progress_batch_id != INVALID_BATCH) {
         status = waitBatch(progress_batch_id);
         if (status != STATUS_COMPLETED) {
-            std::cerr << "Error wait for progress update completion"
-                      << std::endl;
+            LOG(ERROR) << "Error wait for progress update completion";
             goto cleanup;
         }
     }
@@ -156,20 +155,18 @@ int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
                                  num_done, ctrl_block, target_segment_id,
                                  target_progress_addr);
     if (rc) {
-        std::cerr << "Fail to update the progress" << std::endl;
+        LOG(ERROR) << "Fail to update the progress";
         goto cleanup;
     }
     if (progress_batch_id != INVALID_BATCH) {
         status = waitBatch(progress_batch_id);
         if (status != STATUS_COMPLETED) {
-            std::cerr << "Error wait for progress update completion"
-                      << std::endl;
+            LOG(ERROR) << "Error wait for progress update completion";
             goto cleanup;
         }
     }
 
-    std::cerr << "Completed transfer request: " << num_done << " tasks"
-              << std::endl;
+    LOG(INFO) << "Completed transfer request: " << num_done << " tasks";
     return 0;
 
 cleanup:
@@ -177,7 +174,7 @@ cleanup:
     for (size_t task_idx = num_done; task_idx < tasks.size(); ++task_idx) {
         status = waitTask(tasks[task_idx]);
         if (status != STATUS_COMPLETED)
-            std::cerr << "Failed to wait for task completion" << std::endl;
+            LOG(ERROR) << "Failed to wait for task completion";
     }
     return -1;
 }
@@ -190,8 +187,8 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     // if source_addr is invalid, will be detected here
     Region *region = region_mgr_.getRegion(task.source_addr, task.length);
     if (!region) {
-        std::cerr << "Source address 0x" << std::hex << task.source_addr
-                  << " not in registered copiable regions" << std::endl;
+        LOG(ERROR) << "Source address 0x" << std::hex << task.source_addr
+                   << " not in registered copiable regions";
         return -1;
     }
 
@@ -204,8 +201,8 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     if (buffer_used_by_task_idx >= 0) {  // wait for a previous task to complete
         status = waitTask(tasks[buffer_used_by_task_idx]);
         if (status != STATUS_COMPLETED) {
-            std::cerr << "Failed to wait for previous task on buffer "
-                      << buffer_idx << std::endl;
+            LOG(ERROR) << "Failed to wait for previous task on buffer "
+                       << buffer_idx;
             return -1;
         }
     }
@@ -227,7 +224,7 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     batch_id_t batch_id;
     rc = submitBatch(batch_id, req);
     if (rc) {
-        std::cerr << "Failed to submit RDMA write" << std::endl;
+        LOG(ERROR) << "Failed to submit RDMA write";
         return rc;
     }
 
@@ -284,8 +281,8 @@ RdmaCopyBackend::BufferPair *RdmaCopyBackend::allocBufferPair(
 
     BufferPair *pair = new BufferPair(buffer_base, size, is_cuda);
 
-    std::cerr << "Allocated buffer pair of size " << size << " for location "
-              << location << " (total=" << total_size << ")" << std::endl;
+    LOG(INFO) << "Allocated buffer pair of size " << size << " for location "
+              << location << " (total=" << total_size << ")";
     return pair;
 }
 

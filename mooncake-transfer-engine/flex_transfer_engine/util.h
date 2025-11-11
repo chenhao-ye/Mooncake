@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <bits/stdint-uintn.h>
 #include <errno.h>
+#include <glog/logging.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
@@ -23,7 +24,7 @@ static inline std::vector<std::string> findLocalIpv4Addresses() {
     struct ifaddrs *ifaddr, *ifa;
 
     if (getifaddrs(&ifaddr) == -1) {
-        std::cerr << "getifaddrs failed";
+        LOG(ERROR) << "getifaddrs failed";
         return ips;
     }
 
@@ -54,7 +55,7 @@ static inline std::vector<std::string> findLocalIpv6Addresses() {
     struct ifaddrs *ifaddr, *ifa;
 
     if (getifaddrs(&ifaddr) == -1) {
-        std::cerr << "getifaddrs failed";
+        LOG(ERROR) << "getifaddrs failed";
         return ips;
     }
 
@@ -147,11 +148,11 @@ static inline ssize_t readFully(int fd, void *buf, size_t len) {
         if (rc < 0 && (errno == EAGAIN || errno == EINTR))
             continue;
         else if (rc < 0) {
-            std::cerr << "Socket read failed";
+            LOG(ERROR) << "Socket read failed";
             return rc;
         } else if (rc == 0) {
-            std::cerr << "Socket read incompleted: expected " << len
-                      << " bytes, actual " << len - nbytes << " bytes";
+            LOG(ERROR) << "Socket read incompleted: expected " << len
+                       << " bytes, actual " << len - nbytes << " bytes";
             return len - nbytes;
         }
         pos += rc;
@@ -168,11 +169,11 @@ static inline ssize_t writeFully(int fd, const void *buf, size_t len) {
         if (rc < 0 && (errno == EAGAIN || errno == EINTR))
             continue;
         else if (rc < 0) {
-            std::cerr << "Socket write failed";
+            LOG(ERROR) << "Socket write failed";
             return rc;
         } else if (rc == 0) {
-            std::cerr << "Socket write incompleted: expected " << len
-                      << " bytes, actual " << len - nbytes << " bytes";
+            LOG(ERROR) << "Socket write incompleted: expected " << len
+                       << " bytes, actual " << len - nbytes << " bytes";
             return len - nbytes;
         }
         pos += rc;

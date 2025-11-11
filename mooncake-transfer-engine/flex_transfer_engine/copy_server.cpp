@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <glog/logging.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
@@ -60,8 +61,7 @@ void CopyServer::startListener() {
         use_ipv6 ? ("[" + server_ip + "]:" + std::to_string(tcp_port))
                  : (server_ip + ":" + std::to_string(tcp_port));
 
-    std::cerr << "TCP listener started on " << local_copy_server_url_
-              << std::endl;
+    LOG(INFO) << "TCP listener started on " << local_copy_server_url_;
 
     // Create eventfd for stopping the worker thread
     stop_event_fd_ = eventfd(0, EFD_NONBLOCK);
@@ -129,12 +129,12 @@ void CopyServer::stopListener() {
             listener_fd_ = -1;
         }
 
-        std::cerr << "TCP listener stopped" << std::endl;
+        LOG(INFO) << "TCP listener stopped";
     }
 }
 
 void CopyServer::workerThread() {
-    std::cerr << "Worker thread started" << std::endl;
+    LOG(INFO) << "Worker thread started";
 
     // Set listener to non-blocking
     int flags = fcntl(listener_fd_, F_GETFL, 0);
@@ -148,7 +148,7 @@ void CopyServer::workerThread() {
         int nfds = epoll_wait(epoll_fd_, events, kMaxEvents, -1);
         if (nfds < 0) {
             if (errno == EINTR) continue;
-            std::cerr << "epoll_wait error: " << strerror(errno) << std::endl;
+            LOG(ERROR) << "epoll_wait error: " << strerror(errno);
             continue;
         }
 
@@ -181,12 +181,11 @@ void CopyServer::workerThread() {
                         sizeof(client_ip), client_port, sizeof(client_port),
                         NI_NUMERICHOST | NI_NUMERICSERV);
                     if (rc == 0) {
-                        std::cerr << "Accepted connection from " << client_ip
-                                  << ":" << client_port << std::endl;
+                        LOG(INFO) << "Accepted connection from " << client_ip
+                                  << ":" << client_port;
                     } else {
-                        std::cerr
-                            << "Accepted connection (failed to resolve address)"
-                            << std::endl;
+                        LOG(INFO) << "Accepted connection (failed to resolve "
+                                     "address)";
                     }
 
                     // Add new client to epoll
@@ -195,8 +194,8 @@ void CopyServer::workerThread() {
                     ev.data.fd = client_fd;
                     rc = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev);
                     if (rc < 0) {
-                        std::cerr << "Failed to add client to epoll: "
-                                  << strerror(errno) << std::endl;
+                        LOG(ERROR) << "Failed to add client to epoll: "
+                                   << strerror(errno);
                         close(client_fd);
                     } else {
                         active_client_fds_.insert(client_fd);
@@ -215,20 +214,19 @@ void CopyServer::workerThread() {
                 } else if (copy_mode == CopyMode::TCP) {
                     rc = processTcpRequest(ready_fd);
                 } else {
-                    std::cerr << "Invalid CopyMode value: "
-                              << static_cast<uint32_t>(copy_mode) << std::endl;
+                    LOG(ERROR) << "Invalid CopyMode value: "
+                               << static_cast<uint32_t>(copy_mode);
                     rc = -1;
                 }
             } else {
-                std::cerr << "Failed to read CopyMode from client fd="
-                          << ready_fd << std::endl;
+                LOG(ERROR) << "Failed to read CopyMode from client fd="
+                           << ready_fd;
                 rc = -1;
             }
 
             if (rc != 0) {
                 // Error occurred or client disconnected, close and remove
-                std::cerr << "Closing client connection fd=" << ready_fd
-                          << std::endl;
+                LOG(INFO) << "Closing client connection fd=" << ready_fd;
 
                 epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, ready_fd, nullptr);
                 close(ready_fd);
@@ -243,7 +241,7 @@ cleanup:
     for (int client_fd : active_client_fds_) close(client_fd);
     active_client_fds_.clear();
 
-    std::cerr << "Worker thread stopped" << std::endl;
+    LOG(INFO) << "Worker thread stopped";
 }
 
 int CopyServer::processRdmaRequest(int client_fd) {
@@ -263,7 +261,7 @@ int CopyServer::processRdmaRequest(int client_fd) {
 
     ctrl_block = rdma_copy_backend_.allocCtrlBlock();
     if (!ctrl_block) {
-        std::cerr << "Failed to acquire RdmaCopyCtrlBlock" << std::endl;
+        LOG(ERROR) << "Failed to acquire RdmaCopyCtrlBlock";
         goto cleanup;
     }
 
@@ -278,8 +276,7 @@ cleanup:
     // If this fails, the connection should be closed
     if (writeFully(client_fd, &num_done, sizeof(num_done)) !=
         sizeof(num_done)) {
-        std::cerr << "Failed to send completion count, closing connection"
-                  << std::endl;
+        LOG(ERROR) << "Failed to send completion count, closing connection";
         success = false;
     }
 
@@ -303,14 +300,13 @@ int CopyServer::readSegmentName(int client_fd, std::string &segment_name) {
     // read segment name length
     if (readFully(client_fd, &segment_name_len, sizeof(segment_name_len)) !=
         sizeof(segment_name_len)) {
-        std::cerr << "Failed to read segment name length" << std::endl;
+        LOG(ERROR) << "Failed to read segment name length";
         return -1;
     }
 
     constexpr size_t kMaxLength = 1ull << 20;
     if (segment_name_len == 0 || segment_name_len > kMaxLength) {
-        std::cerr << "Invalid segment name length: " << segment_name_len
-                  << std::endl;
+        LOG(ERROR) << "Invalid segment name length: " << segment_name_len;
         return -1;
     }
 
@@ -318,11 +314,11 @@ int CopyServer::readSegmentName(int client_fd, std::string &segment_name) {
     segment_name.resize(segment_name_len + 1);
     if (readFully(client_fd, segment_name.data(), segment_name_len) !=
         segment_name_len) {
-        std::cerr << "Failed to read segment name" << std::endl;
+        LOG(ERROR) << "Failed to read segment name";
         return -1;
     }
 
-    std::cerr << "Received request for segment: " << segment_name << std::endl;
+    LOG(INFO) << "Received request for segment: " << segment_name;
     return 0;
 }
 
@@ -334,23 +330,23 @@ int CopyServer::readRdmaRequests(int client_fd, uint64_t &target_progress_addr,
 
     nbytes = readFully(client_fd, &header, sizeof(header));
     if (nbytes != sizeof(header)) {
-        std::cerr << "Failed to read RDMA request header" << std::endl;
+        LOG(ERROR) << "Failed to read RDMA request header";
         return -1;
     }
 
     target_progress_addr = header.progress_addr;
     tasks.reserve(header.num_reqs);
 
-    std::cerr << "Received transfer request: progress_addr=0x" << std::hex
+    LOG(INFO) << "Received transfer request: progress_addr=0x" << std::hex
               << target_progress_addr << std::dec
-              << ", num_reqs=" << header.num_reqs << std::endl;
+              << ", num_reqs=" << header.num_reqs;
 
     std::vector<RdmaReq> reqs(header.num_reqs);
     size_t reqs_nbytes = sizeof(RdmaReq) * header.num_reqs;
 
     nbytes = readFully(client_fd, reqs.data(), reqs_nbytes);
     if (nbytes != static_cast<ssize_t>(reqs_nbytes)) {
-        std::cerr << "Failed to read requests" << std::endl;
+        LOG(ERROR) << "Failed to read requests";
         return -1;
     }
 
@@ -373,7 +369,7 @@ int readTcpRequests(int client_fd, std::vector<TcpCopyBackend::Task> &tasks) {
     TcpHeader header;
     nbytes = readFully(client_fd, &header, sizeof(header));
     if (nbytes != sizeof(header)) {
-        std::cerr << "Failed to read number of TCP requests" << std::endl;
+        LOG(ERROR) << "Failed to read number of TCP requests";
         return -1;
     }
     tasks.reserve(header.num_reqs);
@@ -383,7 +379,7 @@ int readTcpRequests(int client_fd, std::vector<TcpCopyBackend::Task> &tasks) {
 
     nbytes = readFully(client_fd, reqs.data(), reqs_nbytes);
     if (nbytes != static_cast<ssize_t>(reqs_nbytes)) {
-        std::cerr << "Failed to read TCP requests" << std::endl;
+        LOG(ERROR) << "Failed to read TCP requests";
         return -1;
     }
 

@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <glog/logging.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/select.h>
@@ -102,8 +103,8 @@ int FlexTransferEngine::registerLocalMemory(uintptr_t addr, size_t length,
                 return -1;
             }
         }
-        std::cerr << "Registered memory at " << addr << " size " << length
-                  << " for location " << location << std::endl;
+        LOG(INFO) << "Registered memory at " << addr << " size " << length
+                  << " for location " << location;
     }
     return 0;
 }
@@ -165,9 +166,9 @@ int FlexTransferEngine::registerLocalMemoryBatch(
             }
         }
 
-        std::cerr << "Registered " << buffer_list.size()
+        LOG(INFO) << "Registered " << buffer_list.size()
                   << " buffers for location " << location << ", max size "
-                  << max_size << std::endl;
+                  << max_size;
     }
     return 0;
 }

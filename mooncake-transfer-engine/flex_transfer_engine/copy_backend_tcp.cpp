@@ -1,5 +1,7 @@
 #include "copy_backend_tcp.h"
 
+#include <glog/logging.h>
+
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -115,8 +117,8 @@ bool TcpCopyBackend::getNextChunk(TaskIter &task_iter, std::vector<Task> &tasks,
         if (!task.region) {
             task.region = region_mgr_.getRegion(task.addr, task.length);
             if (!task.region) {
-                std::cerr << "Source address 0x" << std::hex << task.addr
-                          << " not in registered copiable regions" << std::endl;
+                LOG(ERROR) << "Source address 0x" << std::hex << task.addr
+                           << " not in registered copiable regions";
                 throw std::runtime_error(
                     "Source address not in registered copiable regions");
             }
@@ -285,12 +287,12 @@ int TcpCopyBackend::processRequest(int client_fd, std::vector<Task> &tasks) {
 #endif
     ssize_t nbytes = writeFully(client_fd, send_addr, curr->length);
     if (nbytes != static_cast<ssize_t>(curr->length)) {
-        std::cerr << "Failed to send last chunk" << std::endl;
+        LOG(ERROR) << "Failed to send last chunk";
         return -1;
     }
 
-    std::cerr << "Completed TCP transfer request: sent " << tasks.size()
-              << " tasks" << std::endl;
+    LOG(INFO) << "Completed TCP transfer request: sent " << tasks.size()
+              << " tasks";
     return 0;
 }
 
@@ -407,8 +409,8 @@ int TcpCopyBackend::processResponse(int server_fd, std::vector<Task> &tasks,
 
     progress_counter.store(tasks.size(), std::memory_order_release);
 
-    std::cerr << "Completed TCP transfer response: received " << tasks.size()
-              << " tasks" << std::endl;
+    LOG(INFO) << "Completed TCP transfer response: received " << tasks.size()
+              << " tasks";
     return 0;
 }
 
@@ -432,7 +434,7 @@ void TcpCopyCtrlBlock::workerThreadFunc(TcpCopyCtrlBlock *ctrl_block) {
         int rc = ctrl_block->backend_.processResponse(
             ctrl_block->server_fd, ctrl_block->tasks,
             ctrl_block->progress_counter);
-        if (rc) std::cerr << "Error processing TCP response" << std::endl;
+        if (rc) LOG(ERROR) << "Error processing TCP response";
         // reset all fields to indicate done
         ctrl_block->server_fd = -1;
         int64_t num_done = ctrl_block->tasks.size();

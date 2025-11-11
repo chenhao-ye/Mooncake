@@ -120,7 +120,7 @@ int FlexBatch::getTransferStatus(size_t task_id) {
     // it has been finalized, so no more progress will be made
     if (isCopyFinalized()) return STATUS_FAILED;
 
-    assert(rdma_copy_backend_ || tcp_ctrl_block_);
+    assert(rdma_ctrl_block_ || tcp_ctrl_block_);
     if (rdma_ctrl_block_) {
         checkRdmaProgress();
     } else if (tcp_ctrl_block_) {

@@ -364,7 +364,8 @@ int CopyServer::readRdmaRequests(int client_fd, uint64_t &target_progress_addr,
 }
 
 // read TCP requests from fd into tasks
-int readTcpRequests(int client_fd, std::vector<TcpCopyBackend::Task> &tasks) {
+int CopyServer::readTcpRequests(int client_fd,
+                                std::vector<TcpCopyBackend::Task> &tasks) {
     ssize_t nbytes;
     TcpHeader header;
     nbytes = readFully(client_fd, &header, sizeof(header));

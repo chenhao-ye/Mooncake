@@ -108,6 +108,16 @@ class RdmaCopyBackend {
     void copyMemory(void *dst, const void *src, size_t size,
                     BufferPair &buffer_pair);
 
+    // Acquire a buffer from the buffer pair for the given task
+    // Waits for the previous task using the selected buffer if needed
+    // Sets task.buffer_pair, task.buffer_idx, and marks buffer as owned
+    // Returns the buffer pointer on success, nullptr on error
+    void *acquireBuffer(BufferPair &buffer_pair, std::vector<Task> &tasks,
+                        size_t task_idx);
+
+    // Release a buffer back to the buffer pair (mark as free)
+    void releaseBuffer(Task &task);
+
     // Execute the task specified by task_idx
     int executeTask(std::vector<Task> &tasks, size_t task_idx,
                     int target_segment_id);

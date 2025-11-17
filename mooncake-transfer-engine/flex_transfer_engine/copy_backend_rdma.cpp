@@ -106,8 +106,9 @@ int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
                 status = pollBatch(tasks[i].batch_id);
                 if (status == STATUS_WAITING) break;
                 freeBatch(tasks[i].batch_id);
+                releaseBuffer(tasks[i]);  // Release buffer regardless of status
                 if (status != STATUS_COMPLETED) {
-                    LOG(ERROR) << "Transfer error for task_idx=" << task_idx;
+                    LOG(ERROR) << "Transfer error for task_idx=" << i;
                     goto cleanup;
                 }
             }
@@ -179,9 +180,40 @@ cleanup:
     return -1;
 }
 
+void *RdmaCopyBackend::acquireBuffer(BufferPair &buffer_pair,
+                                     std::vector<Task> &tasks,
+                                     size_t task_idx) {
+    int buffer_idx = buffer_pair.selectNextBuffer();
+    int buffer_used_by_task_idx = buffer_pair.users[buffer_idx];
+
+    // If buffer is in use by a previous task, wait for it to complete
+    if (buffer_used_by_task_idx >= 0) {
+        assert(buffer_used_by_task_idx < static_cast<int>(task_idx));
+        int status = waitTask(tasks[buffer_used_by_task_idx]);
+        if (status != STATUS_COMPLETED) {
+            LOG(ERROR) << "Failed to wait for previous task on buffer "
+                       << buffer_idx;
+            return nullptr;
+        }
+        // waitTask has released the buffer
+    }
+
+    // Mark buffer as owned by current task and update task metadata
+    buffer_pair.users[buffer_idx] = task_idx;
+    tasks[task_idx].buffer_pair = &buffer_pair;
+    tasks[task_idx].buffer_idx = buffer_idx;
+    return buffer_pair.buffers[buffer_idx];
+}
+
+void RdmaCopyBackend::releaseBuffer(Task &task) {
+    task.buffer_pair->users[task.buffer_idx] = -1;
+    task.buffer_pair = nullptr;
+    task.buffer_idx = -1;
+}
+
 int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
                                  int target_segment_id) {
-    int rc, status;
+    int rc;
     Task &task = tasks[task_idx];
     // delayed source address validation:
     // if source_addr is invalid, will be detected here
@@ -196,18 +228,9 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
     BufferPair &buffer_pair = getBufferPair(region->loc_id);
     assert(buffer_pair.size >= task.length);
 
-    int buffer_idx = buffer_pair.selectNextBuffer();
-    int buffer_used_by_task_idx = buffer_pair.users[buffer_idx];
-    if (buffer_used_by_task_idx >= 0) {  // wait for a previous task to complete
-        status = waitTask(tasks[buffer_used_by_task_idx]);
-        if (status != STATUS_COMPLETED) {
-            LOG(ERROR) << "Failed to wait for previous task on buffer "
-                       << buffer_idx;
-            return -1;
-        }
-    }
-
-    void *buffer = buffer_pair.buffers[buffer_idx];
+    // Acquire a buffer (waits for previous task if needed, sets task metadata)
+    void *buffer = acquireBuffer(buffer_pair, tasks, task_idx);
+    if (!buffer) return -1;
 
     // Copy data from source to buffer
     copyMemory(buffer, task.source_addr, task.length, buffer_pair);
@@ -221,16 +244,12 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
         .length = task.length,
     };
 
-    batch_id_t batch_id;
-    rc = submitBatch(batch_id, req);
+    rc = submitBatch(task.batch_id, req);
     if (rc) {
         LOG(ERROR) << "Failed to submit RDMA write";
+        releaseBuffer(task);
         return rc;
     }
-
-    task.batch_id = batch_id;
-    task.buffer_pair = &buffer_pair;
-    task.buffer_idx = buffer_idx;
     return 0;
 }
 
@@ -307,9 +326,7 @@ int RdmaCopyBackend::waitTask(Task &task) {
     if (task.batch_id == INVALID_BATCH) return 0;
 
     int status = waitBatch(task.batch_id);
-    task.buffer_pair->users[task.buffer_idx] = -1;  // mark buffer free
-    task.buffer_pair = nullptr;
-    task.buffer_idx = -1;
+    releaseBuffer(task);
     return status;
 }
 

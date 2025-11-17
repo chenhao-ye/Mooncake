@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -27,12 +30,31 @@ class RegionMgr {
     std::mutex regions_mutex_;
 
    public:
-    RegionMgr() = default;
+    RegionMgr() : physical_to_logical_cuda_device_(parseCudaVisibleDevices()) {}
+
     LocId getLocId(const std::string &location) {
         // extract CUDA device from location string (e.g., "cuda:0" -> 0)
-        int32_t cuda_device = -1;  // -1 for CPU
-        if (location.find("cuda:") == 0)
-            cuda_device = std::stoi(location.substr(5));
+        int cuda_device = -1;  // -1 for CPU
+
+        if (location.find("cuda:") == 0) {
+            int physical_device = std::stoi(location.substr(5));
+
+            // Convert physical device ID to logical device ID if mapping exists
+            if (!physical_to_logical_cuda_device_.empty()) {
+                if (physical_device < 0 ||
+                    physical_device >=
+                        static_cast<int>(
+                            physical_to_logical_cuda_device_.size()) ||
+                    physical_to_logical_cuda_device_[physical_device] == -1) {
+                    throw std::runtime_error(
+                        "CUDA device " + std::to_string(physical_device) +
+                        " not found in CUDA_VISIBLE_DEVICES");
+                }
+                cuda_device = physical_to_logical_cuda_device_[physical_device];
+            } else {
+                cuda_device = physical_device;
+            }
+        }
 
         // search to find existing location
         for (uint32_t i = 0; i < location_strings_.size(); ++i) {
@@ -71,6 +93,31 @@ class RegionMgr {
     }
 
    private:
+    std::vector<int> parseCudaVisibleDevices() {
+        const char *cuda_visible_devices = std::getenv("CUDA_VISIBLE_DEVICES");
+        if (cuda_visible_devices == nullptr ||
+            cuda_visible_devices[0] == '\0') {
+            return {};  // No mapping needed, use physical device IDs directly
+        }
+
+        std::vector<int> mapping;
+        std::istringstream iss(cuda_visible_devices);
+        std::string token;
+        int logical_idx = 0;
+
+        while (std::getline(iss, token, ',')) {
+            int physical_id = std::stoi(token);
+
+            if (physical_id >= static_cast<int>(mapping.size()))
+                mapping.resize(physical_id + 1, -1);
+
+            mapping[physical_id] = logical_idx;
+            ++logical_idx;
+        }
+
+        return mapping;
+    }
+
     // Copiable memory regions (addr -> region info)
     // Tracks regions that can be read via copy transfer.
     std::unordered_map<void *, Region> regions_;
@@ -78,4 +125,9 @@ class RegionMgr {
     // Location string storage (LocId -> location string)
     // Append-only; will never remove entries
     std::vector<std::string> location_strings_;
+
+    // CUDA device mapping (physical device ID -> logical device ID for
+    // cudaSetDevice) -1 indicates unavailable/invalid device. Empty if
+    // CUDA_VISIBLE_DEVICES not set.
+    const std::vector<int> physical_to_logical_cuda_device_;
 };

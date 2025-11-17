@@ -190,7 +190,7 @@ void CopyServer::workerThread() {
 
                     // Add new client to epoll
                     struct epoll_event ev;
-                    ev.events = EPOLLIN;
+                    ev.events = EPOLLIN | EPOLLRDHUP;
                     ev.data.fd = client_fd;
                     rc = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, client_fd, &ev);
                     if (rc < 0) {
@@ -201,6 +201,17 @@ void CopyServer::workerThread() {
                         active_client_fds_.insert(client_fd);
                     }
                 }
+                continue;
+            }
+
+            // Check for connection closure or errors
+            if (events[i].events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+                LOG(INFO) << "Client connection closed or error detected fd="
+                          << ready_fd << " events=0x" << std::hex
+                          << events[i].events << std::dec;
+                epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, ready_fd, nullptr);
+                close(ready_fd);
+                active_client_fds_.erase(ready_fd);
                 continue;
             }
 

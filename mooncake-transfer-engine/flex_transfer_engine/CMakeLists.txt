@@ -37,12 +37,12 @@ install(TARGETS flex_transfer_engine
     ARCHIVE DESTINATION lib
 )
 
-# Build example program
-if (BUILD_EXAMPLES)
-    add_executable(flex_transfer_example example.cpp)
-    target_link_libraries(flex_transfer_example
-        flex_transfer_engine
-        transfer_engine
-    )
-    install(TARGETS flex_transfer_example DESTINATION bin)
-endif()
+# # Build example program
+# if (BUILD_EXAMPLES)
+#     add_executable(flex_transfer_example example.cpp)
+#     target_link_libraries(flex_transfer_example
+#         flex_transfer_engine
+#         transfer_engine
+#     )
+#     install(TARGETS flex_transfer_example DESTINATION bin)
+# endif()

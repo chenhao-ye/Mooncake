@@ -20,9 +20,17 @@ TcpCopyBackend::BufferPair::BufferPair()
     err = cudaMallocHost(&buffers[1], kBufferSize);
     if (err != cudaSuccess) goto cleanup;
 
-    err = cudaStreamCreate(&streams[0]);
+    // Get the priority range and create streams with highest priority
+    int leastPriority, greatestPriority;
+    err = cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority);
     if (err != cudaSuccess) goto cleanup;
-    err = cudaStreamCreate(&streams[1]);
+
+    // Create both streams with highest priority (lowest numerical value)
+    err = cudaStreamCreateWithPriority(&streams[0], cudaStreamNonBlocking,
+                                       greatestPriority);
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaStreamCreateWithPriority(&streams[1], cudaStreamNonBlocking,
+                                       greatestPriority);
     if (err != cudaSuccess) goto cleanup;
 
     return;
@@ -32,7 +40,7 @@ cleanup:
     if (streams[1]) cudaStreamDestroy(streams[1]);
     if (buffers[0]) cudaFreeHost(buffers[0]);
     if (buffers[1]) cudaFreeHost(buffers[1]);
-    throw std::runtime_error(std::string("Failed to initialize BufferPair") +
+    throw std::runtime_error(std::string("Failed to initialize BufferPair: ") +
                              cudaGetErrorString(err));
 }
 

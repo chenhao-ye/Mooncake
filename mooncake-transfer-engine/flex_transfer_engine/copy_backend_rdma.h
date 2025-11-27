@@ -160,41 +160,14 @@ class RdmaCopyBackend {
         bool is_cuda;  // true if CUDA memory, false if CPU memory
 
         // Used by tasks with given index (-1 for unused)
-        int users[2] = {-1, -1};
+        int users[2];
 
 #ifdef USE_CUDA
         cudaStream_t cuda_stream;
 #endif
 
-        BufferPair(char *buffer_base, size_t size, bool is_cuda)
-            : buffers{buffer_base, buffer_base + size},
-              size(size),
-              is_cuda(is_cuda),
-              users{-1, -1}
-#ifdef USE_CUDA
-              ,
-              cuda_stream(nullptr)
-#endif
-        {
-#ifdef USE_CUDA
-            if (is_cuda) {
-                cudaError_t err = cudaStreamCreate(&cuda_stream);
-                if (err != cudaSuccess) {
-                    throw std::runtime_error(
-                        std::string("Failed to create CUDA stream: ") +
-                        cudaGetErrorString(err));
-                }
-            }
-#endif
-        }
-
-        ~BufferPair() {
-#ifdef USE_CUDA
-            if (is_cuda && cuda_stream) {
-                cudaStreamDestroy(cuda_stream);
-            }
-#endif
-        }
+        BufferPair(char *buffer_base, size_t size, bool is_cuda);
+        ~BufferPair();
 
         BufferPair(const BufferPair &) = delete;
         BufferPair(BufferPair &&) = delete;
@@ -204,7 +177,7 @@ class RdmaCopyBackend {
         // select the next buffer to use
         // return the one with a lower-index task (likely to finish earlier OR
         // is free for users[i]<0)
-        int selectNextBuffer() { return users[0] <= users[1] ? 0 : 1; }
+        int selectNextBuffer();
     };
 };
 

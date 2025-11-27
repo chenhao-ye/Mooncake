@@ -322,6 +322,53 @@ void RdmaCopyBackend::freeBufferPair(BufferPair *pair) {
     delete pair;
 }
 
+RdmaCopyBackend::BufferPair::BufferPair(char *buffer_base, size_t size,
+                                        bool is_cuda)
+    : buffers{buffer_base, buffer_base + size},
+      size(size),
+      is_cuda(is_cuda),
+      users{-1, -1}
+#ifdef USE_CUDA
+      ,
+      cuda_stream(nullptr)
+#endif
+{
+#ifdef USE_CUDA
+    if (is_cuda) {
+        // Get the priority range and set stream to highest priority
+        int leastPriority, greatestPriority;
+        cudaError_t err = cudaDeviceGetStreamPriorityRange(
+            &leastPriority, &greatestPriority);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("Failed to get CUDA stream priority range: ") +
+                cudaGetErrorString(err));
+        }
+
+        // Create stream with highest priority (lowest numerical value)
+        err = cudaStreamCreateWithPriority(&cuda_stream, cudaStreamNonBlocking,
+                                           greatestPriority);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("Failed to create CUDA stream: ") +
+                cudaGetErrorString(err));
+        }
+    }
+#endif
+}
+
+RdmaCopyBackend::BufferPair::~BufferPair() {
+#ifdef USE_CUDA
+    if (is_cuda && cuda_stream) {
+        cudaStreamDestroy(cuda_stream);
+    }
+#endif
+}
+
+int RdmaCopyBackend::BufferPair::selectNextBuffer() {
+    return users[0] <= users[1] ? 0 : 1;
+}
+
 int RdmaCopyBackend::waitTask(Task &task) {
     if (task.batch_id == INVALID_BATCH) return 0;
 

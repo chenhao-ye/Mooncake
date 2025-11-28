@@ -103,24 +103,30 @@ class RdmaCopyBackend {
     std::vector<BufferPair *> buffer_pool_;
 
    private: /* Helper functions for task execution */
-    // Copy memory from src to dst; handle both CPU and CUDA memory
-    // For CUDA memory, uses async copy with the stream from buffer_pair
-    void copyMemory(void *dst, const void *src, size_t size,
-                    BufferPair &buffer_pair);
+    // Copy memory from src to buffer; handle both CPU and CUDA memory
+    // For CUDA memory, uses async copy and records event for the given
+    // buffer_idx Destination is inferred from buffer_pair.buffers[buffer_idx]
+    void memcpyAsync(const void *src, size_t size, BufferPair &buffer_pair,
+                     int buffer_idx);
 
     // Acquire a buffer from the buffer pair for the given task
     // Waits for the previous task using the selected buffer if needed
     // Sets task.buffer_pair, task.buffer_idx, and marks buffer as owned
-    // Returns the buffer pointer on success, nullptr on error
-    void *acquireBuffer(BufferPair &buffer_pair, std::vector<Task> &tasks,
-                        size_t task_idx);
+    // Returns 0 on success, -1 on error
+    int acquireBuffer(BufferPair &buffer_pair, std::vector<Task> &tasks,
+                      size_t task_idx);
 
     // Release a buffer back to the buffer pair (mark as free)
     void releaseBuffer(Task &task);
 
-    // Execute the task specified by task_idx
-    int executeTask(std::vector<Task> &tasks, size_t task_idx,
-                    int target_segment_id);
+    // Phase 1: Start async CUDA copy (non-blocking)
+    // Acquires buffer, validates region, starts copy, records CUDA event
+    int startTaskCopy(std::vector<Task> &tasks, size_t task_idx,
+                      int target_segment_id);
+
+    // Phase 2: Wait for copy completion and submit RDMA transfer
+    // Synchronizes on CUDA event if needed, then submits RDMA batch
+    int submitTaskRdma(Task &task, int target_segment_id);
 
     // Wait until the given task is done
     int waitTask(Task &task);
@@ -164,6 +170,7 @@ class RdmaCopyBackend {
 
 #ifdef USE_CUDA
         cudaStream_t cuda_stream;
+        cudaEvent_t copy_done_events[2];  // one event per buffer
 #endif
 
         BufferPair(char *buffer_base, size_t size, bool is_cuda);

@@ -97,16 +97,32 @@ int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
 
     int rc, status;
 
-    for (size_t task_idx = 0; task_idx < tasks.size(); ++task_idx) {
-        rc = executeTask(tasks, task_idx, target_segment_id);
+    // pipeline: start copy for task N+1 before submitting RDMA for task N
+    // this allows task N's copy to overlap with task N-1's RDMA transfer
+    if (!tasks.empty()) {
+        rc = startTaskCopy(tasks, 0, target_segment_id);
         if (rc) goto cleanup;
+    }
+
+    // loop where task_idx is the index for RDMA submission
+    for (size_t task_idx = 0; task_idx < tasks.size(); ++task_idx) {
+        // submit RDMA for current task (whose copy was started earlier)
+        rc = submitTaskRdma(tasks[task_idx], target_segment_id);
+        if (rc) goto cleanup;
+
+        // start copy for next task (if exists) to overlap with current RDMA
+        if (task_idx + 1 < tasks.size()) {
+            rc = startTaskCopy(tasks, task_idx + 1, target_segment_id);
+            if (rc) goto cleanup;
+        }
+
         // check if any waiting tasks are done
         for (size_t i = num_done; i <= task_idx; ++i) {
             if (tasks[i].batch_id != INVALID_BATCH) {
                 status = pollBatch(tasks[i].batch_id);
                 if (status == STATUS_WAITING) break;
                 freeBatch(tasks[i].batch_id);
-                releaseBuffer(tasks[i]);  // Release buffer regardless of status
+                releaseBuffer(tasks[i]);  // release buffer regardless of status
                 if (status != STATUS_COMPLETED) {
                     LOG(ERROR) << "Transfer error for task_idx=" << i;
                     goto cleanup;
@@ -114,6 +130,7 @@ int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
             }
             ++num_done;
         }
+
         // update remote progress if we have made enough progress
         if ((num_done - last_updated_num_done) >= update_freq) {
             rc = tryUpdateRemoteProgress(
@@ -180,29 +197,29 @@ cleanup:
     return -1;
 }
 
-void *RdmaCopyBackend::acquireBuffer(BufferPair &buffer_pair,
-                                     std::vector<Task> &tasks,
-                                     size_t task_idx) {
+int RdmaCopyBackend::acquireBuffer(BufferPair &buffer_pair,
+                                   std::vector<Task> &tasks, size_t task_idx) {
     int buffer_idx = buffer_pair.selectNextBuffer();
     int buffer_used_by_task_idx = buffer_pair.users[buffer_idx];
 
-    // If buffer is in use by a previous task, wait for it to complete
+    // if buffer is in use by a previous task, wait for it to complete
     if (buffer_used_by_task_idx >= 0) {
         assert(buffer_used_by_task_idx < static_cast<int>(task_idx));
         int status = waitTask(tasks[buffer_used_by_task_idx]);
         if (status != STATUS_COMPLETED) {
-            LOG(ERROR) << "Failed to wait for previous task on buffer "
+            LOG(ERROR) << "Failed to wait for previous task "
+                       << buffer_used_by_task_idx << " on buffer "
                        << buffer_idx;
-            return nullptr;
+            return -1;
         }
         // waitTask has released the buffer
     }
 
-    // Mark buffer as owned by current task and update task metadata
+    // mark buffer as owned by current task and update task metadata
     buffer_pair.users[buffer_idx] = task_idx;
     tasks[task_idx].buffer_pair = &buffer_pair;
     tasks[task_idx].buffer_idx = buffer_idx;
-    return buffer_pair.buffers[buffer_idx];
+    return 0;
 }
 
 void RdmaCopyBackend::releaseBuffer(Task &task) {
@@ -211,12 +228,11 @@ void RdmaCopyBackend::releaseBuffer(Task &task) {
     task.buffer_idx = -1;
 }
 
-int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
-                                 int target_segment_id) {
-    int rc;
+int RdmaCopyBackend::startTaskCopy(std::vector<Task> &tasks, size_t task_idx,
+                                   int target_segment_id) {
     Task &task = tasks[task_idx];
-    // delayed source address validation:
-    // if source_addr is invalid, will be detected here
+
+    // validate source address
     Region *region = region_mgr_.getRegion(task.source_addr, task.length);
     if (!region) {
         LOG(ERROR) << "Source address 0x" << std::hex << task.source_addr
@@ -224,27 +240,44 @@ int RdmaCopyBackend::executeTask(std::vector<Task> &tasks, size_t task_idx,
         return -1;
     }
 
-    // Get a buffer pair for this location
     BufferPair &buffer_pair = getBufferPair(region->loc_id);
     assert(buffer_pair.size >= task.length);
 
-    // Acquire a buffer (waits for previous task if needed, sets task metadata)
-    void *buffer = acquireBuffer(buffer_pair, tasks, task_idx);
-    if (!buffer) return -1;
+    int rc = acquireBuffer(buffer_pair, tasks, task_idx);
+    if (rc) return rc;
 
-    // Copy data from source to buffer
-    copyMemory(buffer, task.source_addr, task.length, buffer_pair);
+    // start async copy and record event (if CUDA)
+    memcpyAsync(task.source_addr, task.length, buffer_pair, task.buffer_idx);
 
-    // Submit RDMA write from buffer to remote target
+    return 0;
+}
+
+int RdmaCopyBackend::submitTaskRdma(Task &task, int target_segment_id) {
+#ifdef USE_CUDA
+    // wait for CUDA copy to complete before RDMA reads the buffer
+    if (task.buffer_pair && task.buffer_pair->is_cuda) {
+        cudaEvent_t event = task.buffer_pair->copy_done_events[task.buffer_idx];
+        cudaError_t err = cudaEventSynchronize(event);
+        if (err != cudaSuccess) {
+            LOG(ERROR) << "Failed to sync CUDA event: "
+                       << cudaGetErrorString(err);
+            releaseBuffer(task);
+            return -1;
+        }
+    }
+#endif
+
+    // submit RDMA write from buffer to remote target
+    assert(task.buffer_pair && task.buffer_idx >= 0);
     transfer_request_t req = {
         .opcode = OPCODE_WRITE,
-        .source = buffer,
+        .source = task.buffer_pair->buffers[task.buffer_idx],
         .target_id = target_segment_id,
         .target_offset = task.target_addr,
         .length = task.length,
     };
 
-    rc = submitBatch(task.batch_id, req);
+    int rc = submitBatch(task.batch_id, req);
     if (rc) {
         LOG(ERROR) << "Failed to submit RDMA write";
         releaseBuffer(task);
@@ -337,8 +370,8 @@ RdmaCopyBackend::BufferPair::BufferPair(char *buffer_base, size_t size,
     if (is_cuda) {
         // Get the priority range and set stream to highest priority
         int leastPriority, greatestPriority;
-        cudaError_t err = cudaDeviceGetStreamPriorityRange(
-            &leastPriority, &greatestPriority);
+        cudaError_t err =
+            cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority);
         if (err != cudaSuccess) {
             throw std::runtime_error(
                 std::string("Failed to get CUDA stream priority range: ") +
@@ -353,6 +386,16 @@ RdmaCopyBackend::BufferPair::BufferPair(char *buffer_base, size_t size,
                 std::string("Failed to create CUDA stream: ") +
                 cudaGetErrorString(err));
         }
+
+        // create events for both buffers
+        for (int i = 0; i < 2; ++i) {
+            err = cudaEventCreate(&copy_done_events[i]);
+            if (err != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string("Failed to create CUDA event: ") +
+                    cudaGetErrorString(err));
+            }
+        }
     }
 #endif
 }
@@ -361,6 +404,10 @@ RdmaCopyBackend::BufferPair::~BufferPair() {
 #ifdef USE_CUDA
     if (is_cuda && cuda_stream) {
         cudaStreamDestroy(cuda_stream);
+
+        for (int i = 0; i < 2; ++i) {
+            if (copy_done_events[i]) cudaEventDestroy(copy_done_events[i]);
+        }
     }
 #endif
 }
@@ -415,14 +462,16 @@ int RdmaCopyBackend::tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
     return 0;
 }
 
-// copyMemory is expected to succeed because the given src and dst must have
+// memcpyAsync is expected to succeed because the given src and dst must have
 // been validated; if an error occurs, it is our own fault, not due to invalid
 // input; throw the error instead of gracefully handling
-void RdmaCopyBackend::copyMemory(void *dst, const void *src, size_t size,
-                                 BufferPair &buffer_pair) {
+void RdmaCopyBackend::memcpyAsync(const void *src, size_t size,
+                                  BufferPair &buffer_pair, int buffer_idx) {
+    assert(buffer_idx >= 0 && buffer_idx < 2);
+    void *dst = buffer_pair.buffers[buffer_idx];
+
     if (buffer_pair.is_cuda) {
 #ifdef USE_CUDA
-        // Async copy within CUDA memory
         cudaError_t err = cudaMemcpyAsync(
             dst, src, size, cudaMemcpyDeviceToDevice, buffer_pair.cuda_stream);
         if (err != cudaSuccess) {
@@ -430,12 +479,12 @@ void RdmaCopyBackend::copyMemory(void *dst, const void *src, size_t size,
                                      cudaGetErrorString(err));
         }
 
-        // Wait for the copy to complete
-        err = cudaStreamSynchronize(buffer_pair.cuda_stream);
+        // record event after async copy (for later synchronization)
+        err = cudaEventRecord(buffer_pair.copy_done_events[buffer_idx],
+                              buffer_pair.cuda_stream);
         if (err != cudaSuccess) {
-            throw std::runtime_error(
-                std::string("cudaStreamSynchronize failed: ") +
-                cudaGetErrorString(err));
+            throw std::runtime_error(std::string("cudaEventRecord failed: ") +
+                                     cudaGetErrorString(err));
         }
 #else
         throw std::runtime_error(

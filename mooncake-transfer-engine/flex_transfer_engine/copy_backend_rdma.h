@@ -103,12 +103,6 @@ class RdmaCopyBackend {
     std::vector<BufferPair *> buffer_pool_;
 
    private: /* Helper functions for task execution */
-    // Copy memory from src to buffer; handle both CPU and CUDA memory
-    // For CUDA memory, uses async copy and records event for the given
-    // buffer_idx Destination is inferred from buffer_pair.buffers[buffer_idx]
-    void memcpyAsync(const void *src, size_t size, BufferPair &buffer_pair,
-                     int buffer_idx);
-
     // Acquire a buffer from the buffer pair for the given task
     // Waits for the previous task using the selected buffer if needed
     // Sets task.buffer_pair, task.buffer_idx, and marks buffer as owned
@@ -118,6 +112,12 @@ class RdmaCopyBackend {
 
     // Release a buffer back to the buffer pair (mark as free)
     void releaseBuffer(Task &task);
+
+    // Copy memory from src to buffer; handle both CPU and CUDA memory
+    // For CUDA memory, uses async copy and records event for the given
+    // buffer_idx Destination is inferred from buffer_pair.buffers[buffer_idx]
+    void memcpyAsync(const void *src, size_t size, BufferPair &buffer_pair,
+                     int buffer_idx);
 
     // Phase 1: Start async CUDA copy (non-blocking)
     // Acquires buffer, validates region, starts copy, records CUDA event
@@ -184,7 +184,7 @@ class RdmaCopyBackend {
         // select the next buffer to use
         // return the one with a lower-index task (likely to finish earlier OR
         // is free for users[i]<0)
-        int selectNextBuffer();
+        int selectNextBuffer() { return users[0] <= users[1] ? 0 : 1; }
     };
 };
 

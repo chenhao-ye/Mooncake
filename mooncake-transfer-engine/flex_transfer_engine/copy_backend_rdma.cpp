@@ -68,8 +68,8 @@ int RdmaCopyBackend::prepareBufferPair(LocId loc_id,
         pair = allocBufferPair(loc_id, location, length);
         buffer_pool_[loc_id.idx] = pair;
         if (!pair) return -1;
-        LOG(INFO) << "Allocated buffer pair of size " << length
-                  << " for location " << location;
+        // LOG(INFO) << "Allocated buffer pair of size " << length
+        //           << " for location " << location;
     }
     return 0;
 }
@@ -197,6 +197,121 @@ cleanup:
     return -1;
 }
 
+RdmaCopyBackend::BufferPair *RdmaCopyBackend::allocBufferPair(
+    LocId loc_id, const std::string &location, size_t size) {
+    bool is_cuda = loc_id.cuda_device >= 0;
+    size_t total_size = 2 * size;  // allocate one contiguous buffer w/ 2*size
+    char *buffer_base = nullptr;
+    if (is_cuda) {
+#ifdef USE_CUDA
+        // Use CUDA device ID from loc_id
+        int device_id = loc_id.cuda_device;
+        cudaError_t err = cudaSetDevice(device_id);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("Failed to set CUDA device ") +
+                                     std::to_string(device_id) + ": " +
+                                     cudaGetErrorString(err));
+        }
+
+        err = cudaMalloc(&buffer_base, total_size);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("Failed to allocate GPU memory on device ") +
+                std::to_string(device_id) + ": " + cudaGetErrorString(err));
+        }
+#else
+        throw std::runtime_error(
+            "GPU memory requested but CUDA support not compiled");
+#endif
+    } else {
+        buffer_base = new char[total_size];
+    }
+
+    // Register the entire contiguous buffer with RDMA
+    int rc = ::registerLocalMemory(
+        engine_.getEngine(), buffer_base, total_size, location.c_str(),
+        /*remote_accessible*/ true, /*remote_atomic*/ false);
+    if (rc) {
+        if (is_cuda) {
+#ifdef USE_CUDA
+            cudaFree(buffer_base);
+#endif
+        } else {
+            delete[] buffer_base;
+        }
+        return nullptr;
+    }
+
+    BufferPair *pair = new BufferPair(buffer_base, size, is_cuda);
+
+    // LOG(INFO) << "Allocated buffer pair of size " << size << " for location "
+    //           << location << " (total=" << total_size << ")";
+    return pair;
+}
+
+void RdmaCopyBackend::freeBufferPair(BufferPair *pair) {
+    if (!pair) return;
+
+    char *buffer_base = pair->buffers[0];
+    ::unregisterLocalMemory(engine_.getEngine(), buffer_base);
+
+    if (pair->is_cuda) {
+#ifdef USE_CUDA
+        cudaFree(buffer_base);
+#endif
+    } else {
+        delete[] buffer_base;
+    }
+
+    delete pair;
+}
+
+int RdmaCopyBackend::waitTask(Task &task) {
+    if (task.batch_id == INVALID_BATCH) return 0;
+
+    int status = waitBatch(task.batch_id);
+    releaseBuffer(task);
+    return status;
+}
+
+// Poll if the given progress_batch_id has finished; if so, submit another
+// progress update via atomic fetch-add, which will update progress_batch_id
+// and last_updated_num_done
+int RdmaCopyBackend::tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
+                                             int32_t &last_updated_num_done,
+                                             int32_t num_done,
+                                             RdmaCopyCtrlBlock *ctrl_block,
+                                             segment_id_t target_segment_id,
+                                             uint64_t target_progress_addr) {
+    int status, rc;
+    if (progress_batch_id != INVALID_BATCH) {  // check the last progress update
+        status = pollBatch(progress_batch_id);
+        if (status == STATUS_WAITING) return 0;  // not done
+        // done: completed or error
+        freeBatch(progress_batch_id);
+        if (status != STATUS_COMPLETED) return -1;
+    }
+
+    // no new update
+    if (num_done == last_updated_num_done) return 0;
+
+    // submit another batch for progress update
+    transfer_request_t progress_req = {
+        .opcode = OPCODE_ATOMIC_FETCH_ADD,
+        .source = (void *)&(ctrl_block->progress_counter),
+        .target_id = target_segment_id,
+        .target_offset = target_progress_addr,
+        // for atomic fetch-add, .length is overloaded as the operand value
+        .length = static_cast<uint64_t>(num_done - last_updated_num_done),
+    };
+
+    rc = submitBatch(progress_batch_id, progress_req);
+    if (rc) return rc;
+
+    last_updated_num_done = num_done;
+    return 0;
+}
+
 int RdmaCopyBackend::acquireBuffer(BufferPair &buffer_pair,
                                    std::vector<Task> &tasks, size_t task_idx) {
     int buffer_idx = buffer_pair.selectNextBuffer();
@@ -226,6 +341,39 @@ void RdmaCopyBackend::releaseBuffer(Task &task) {
     task.buffer_pair->users[task.buffer_idx] = -1;
     task.buffer_pair = nullptr;
     task.buffer_idx = -1;
+}
+
+// memcpyAsync is expected to succeed because the given src and dst must have
+// been validated; if an error occurs, it is our own fault, not due to invalid
+// input; throw the error instead of gracefully handling
+void RdmaCopyBackend::memcpyAsync(const void *src, size_t size,
+                                  BufferPair &buffer_pair, int buffer_idx) {
+    assert(buffer_idx >= 0 && buffer_idx < 2);
+    void *dst = buffer_pair.buffers[buffer_idx];
+
+    if (buffer_pair.is_cuda) {
+#ifdef USE_CUDA
+        cudaError_t err = cudaMemcpyAsync(
+            dst, src, size, cudaMemcpyDeviceToDevice, buffer_pair.cuda_stream);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
+                                     cudaGetErrorString(err));
+        }
+
+        // record event after async copy (for later synchronization)
+        err = cudaEventRecord(buffer_pair.copy_done_events[buffer_idx],
+                              buffer_pair.cuda_stream);
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("cudaEventRecord failed: ") +
+                                     cudaGetErrorString(err));
+        }
+#else
+        throw std::runtime_error(
+            "GPU memory copy requested but CUDA support not compiled");
+#endif
+    } else {
+        memcpy(dst, src, size);
+    }
 }
 
 int RdmaCopyBackend::startTaskCopy(std::vector<Task> &tasks, size_t task_idx,
@@ -286,73 +434,41 @@ int RdmaCopyBackend::submitTaskRdma(Task &task, int target_segment_id) {
     return 0;
 }
 
-RdmaCopyBackend::BufferPair *RdmaCopyBackend::allocBufferPair(
-    LocId loc_id, const std::string &location, size_t size) {
-    bool is_cuda = loc_id.cuda_device >= 0;
-    size_t total_size = 2 * size;  // allocate one contiguous buffer w/ 2*size
-    char *buffer_base = nullptr;
-    if (is_cuda) {
-#ifdef USE_CUDA
-        // Use CUDA device ID from loc_id
-        int device_id = loc_id.cuda_device;
-        cudaError_t err = cudaSetDevice(device_id);
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("Failed to set CUDA device ") +
-                                     std::to_string(device_id) + ": " +
-                                     cudaGetErrorString(err));
-        }
-
-        err = cudaMalloc(&buffer_base, total_size);
-        if (err != cudaSuccess) {
-            throw std::runtime_error(
-                std::string("Failed to allocate GPU memory on device ") +
-                std::to_string(device_id) + ": " + cudaGetErrorString(err));
-        }
-#else
-        throw std::runtime_error(
-            "GPU memory requested but CUDA support not compiled");
-#endif
-    } else {
-        buffer_base = new char[total_size];
-    }
-
-    // Register the entire contiguous buffer with RDMA
-    int rc = ::registerLocalMemory(
-        engine_.getEngine(), buffer_base, total_size, location.c_str(),
-        /*remote_accessible*/ true, /*remote_atomic*/ false);
-    if (rc) {
-        if (is_cuda) {
-#ifdef USE_CUDA
-            cudaFree(buffer_base);
-#endif
-        } else {
-            delete[] buffer_base;
-        }
-        return nullptr;
-    }
-
-    BufferPair *pair = new BufferPair(buffer_base, size, is_cuda);
-
-    LOG(INFO) << "Allocated buffer pair of size " << size << " for location "
-              << location << " (total=" << total_size << ")";
-    return pair;
+int RdmaCopyBackend::submitBatch(batch_id_t &batch_id,
+                                 transfer_request_t &req) {
+    batch_id = ::allocateBatchID(engine_.getEngine(), 1);
+    int rc = ::submitTransfer(engine_.getEngine(), batch_id, &req, 1);
+    if (rc) freeBatch(batch_id);  // failed; reset
+    return rc;
 }
 
-void RdmaCopyBackend::freeBufferPair(BufferPair *pair) {
-    if (!pair) return;
+void RdmaCopyBackend::freeBatch(batch_id_t &batch_id) {
+    assert(batch_id != INVALID_BATCH);
+    ::freeBatchID(engine_.getEngine(), batch_id);
+    batch_id = INVALID_BATCH;
+}
 
-    char *buffer_base = pair->buffers[0];
-    ::unregisterLocalMemory(engine_.getEngine(), buffer_base);
+int RdmaCopyBackend::pollBatch(batch_id_t batch_id) {
+    assert(batch_id != INVALID_BATCH);
+    [[maybe_unused]] int rc;
+    transfer_status_t status;
+    rc = ::getTransferStatus(engine_.getEngine(), batch_id, 0, &status);
+    assert(rc == 0);
+    return status.status;
+}
 
-    if (pair->is_cuda) {
-#ifdef USE_CUDA
-        cudaFree(buffer_base);
-#endif
-    } else {
-        delete[] buffer_base;
-    }
+// Wait until the given batch (size=1) is done and then free the batch; will
+// update batch_id to INVALID_BATCH; return the status
+int RdmaCopyBackend::waitBatch(batch_id_t &batch_id) {
+    assert(batch_id != INVALID_BATCH);
 
-    delete pair;
+    int status;
+    do {
+        status = pollBatch(batch_id);
+    } while (status == STATUS_WAITING);
+
+    freeBatch(batch_id);
+    return status;
 }
 
 RdmaCopyBackend::BufferPair::BufferPair(char *buffer_base, size_t size,
@@ -410,124 +526,4 @@ RdmaCopyBackend::BufferPair::~BufferPair() {
         }
     }
 #endif
-}
-
-int RdmaCopyBackend::BufferPair::selectNextBuffer() {
-    return users[0] <= users[1] ? 0 : 1;
-}
-
-int RdmaCopyBackend::waitTask(Task &task) {
-    if (task.batch_id == INVALID_BATCH) return 0;
-
-    int status = waitBatch(task.batch_id);
-    releaseBuffer(task);
-    return status;
-}
-
-// Poll if the given progress_batch_id has finished; if so, submit another
-// progress update via atomic fetch-add, which will update progress_batch_id
-// and last_updated_num_done
-int RdmaCopyBackend::tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
-                                             int32_t &last_updated_num_done,
-                                             int32_t num_done,
-                                             RdmaCopyCtrlBlock *ctrl_block,
-                                             segment_id_t target_segment_id,
-                                             uint64_t target_progress_addr) {
-    int status, rc;
-    if (progress_batch_id != INVALID_BATCH) {  // check the last progress update
-        status = pollBatch(progress_batch_id);
-        if (status == STATUS_WAITING) return 0;  // not done
-        // done: completed or error
-        freeBatch(progress_batch_id);
-        if (status != STATUS_COMPLETED) return -1;
-    }
-
-    // no new update
-    if (num_done == last_updated_num_done) return 0;
-
-    // submit another batch for progress update
-    transfer_request_t progress_req = {
-        .opcode = OPCODE_ATOMIC_FETCH_ADD,
-        .source = (void *)&(ctrl_block->progress_counter),
-        .target_id = target_segment_id,
-        .target_offset = target_progress_addr,
-        // for atomic fetch-add, .length is overloaded as the operand value
-        .length = static_cast<uint64_t>(num_done - last_updated_num_done),
-    };
-
-    rc = submitBatch(progress_batch_id, progress_req);
-    if (rc) return rc;
-
-    last_updated_num_done = num_done;
-    return 0;
-}
-
-// memcpyAsync is expected to succeed because the given src and dst must have
-// been validated; if an error occurs, it is our own fault, not due to invalid
-// input; throw the error instead of gracefully handling
-void RdmaCopyBackend::memcpyAsync(const void *src, size_t size,
-                                  BufferPair &buffer_pair, int buffer_idx) {
-    assert(buffer_idx >= 0 && buffer_idx < 2);
-    void *dst = buffer_pair.buffers[buffer_idx];
-
-    if (buffer_pair.is_cuda) {
-#ifdef USE_CUDA
-        cudaError_t err = cudaMemcpyAsync(
-            dst, src, size, cudaMemcpyDeviceToDevice, buffer_pair.cuda_stream);
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
-                                     cudaGetErrorString(err));
-        }
-
-        // record event after async copy (for later synchronization)
-        err = cudaEventRecord(buffer_pair.copy_done_events[buffer_idx],
-                              buffer_pair.cuda_stream);
-        if (err != cudaSuccess) {
-            throw std::runtime_error(std::string("cudaEventRecord failed: ") +
-                                     cudaGetErrorString(err));
-        }
-#else
-        throw std::runtime_error(
-            "GPU memory copy requested but CUDA support not compiled");
-#endif
-    } else {
-        memcpy(dst, src, size);
-    }
-}
-
-int RdmaCopyBackend::submitBatch(batch_id_t &batch_id,
-                                 transfer_request_t &req) {
-    batch_id = ::allocateBatchID(engine_.getEngine(), 1);
-    int rc = ::submitTransfer(engine_.getEngine(), batch_id, &req, 1);
-    if (rc) freeBatch(batch_id);  // failed; reset
-    return rc;
-}
-
-void RdmaCopyBackend::freeBatch(batch_id_t &batch_id) {
-    assert(batch_id != INVALID_BATCH);
-    ::freeBatchID(engine_.getEngine(), batch_id);
-    batch_id = INVALID_BATCH;
-}
-
-int RdmaCopyBackend::pollBatch(batch_id_t batch_id) {
-    assert(batch_id != INVALID_BATCH);
-    [[maybe_unused]] int rc;
-    transfer_status_t status;
-    rc = ::getTransferStatus(engine_.getEngine(), batch_id, 0, &status);
-    assert(rc == 0);
-    return status.status;
-}
-
-// Wait until the given batch (size=1) is done and then free the batch; will
-// update batch_id to INVALID_BATCH; return the status
-int RdmaCopyBackend::waitBatch(batch_id_t &batch_id) {
-    assert(batch_id != INVALID_BATCH);
-
-    int status;
-    do {
-        status = pollBatch(batch_id);
-    } while (status == STATUS_WAITING);
-
-    freeBatch(batch_id);
-    return status;
 }

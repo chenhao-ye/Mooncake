@@ -159,19 +159,19 @@ class RdmaCopyBackend {
 
     /* BufferPair definition */
     struct BufferPair {
+        struct Buffer {
+            char *addr;
+            int user;
+#ifdef USE_CUDA
+            cudaStream_t cuda_stream;
+            cudaEvent_t copy_done_event;
+#endif
+        };
         // buffers[0] is first half, buffers[1] is second half
-        // buffers[0] is also the base address of allocation
-        char *buffers[2];
+        // buffers[0].addr is also the base address of allocation
+        Buffer buffers[2];
         size_t size;   // Size of each half
         bool is_cuda;  // true if CUDA memory, false if CPU memory
-
-        // Used by tasks with given index (-1 for unused)
-        int users[2];
-
-#ifdef USE_CUDA
-        cudaStream_t cuda_stream;
-        cudaEvent_t copy_done_events[2];  // one event per buffer
-#endif
 
         BufferPair(char *buffer_base, size_t size, bool is_cuda);
         ~BufferPair();
@@ -183,8 +183,10 @@ class RdmaCopyBackend {
 
         // select the next buffer to use
         // return the one with a lower-index task (likely to finish earlier OR
-        // is free for users[i]<0)
-        int selectNextBuffer() { return users[0] <= users[1] ? 0 : 1; }
+        // is free for buffers[i].user<0)
+        int selectNextBuffer() {
+            return buffers[0].user <= buffers[1].user ? 0 : 1;
+        }
     };
 };
 

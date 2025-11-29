@@ -252,7 +252,7 @@ RdmaCopyBackend::BufferPair *RdmaCopyBackend::allocBufferPair(
 void RdmaCopyBackend::freeBufferPair(BufferPair *pair) {
     if (!pair) return;
 
-    char *buffer_base = pair->buffers[0];
+    char *buffer_base = pair->buffers[0].addr;
     ::unregisterLocalMemory(engine_.getEngine(), buffer_base);
 
     if (pair->is_cuda) {
@@ -315,7 +315,8 @@ int RdmaCopyBackend::tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
 int RdmaCopyBackend::acquireBuffer(BufferPair &buffer_pair,
                                    std::vector<Task> &tasks, size_t task_idx) {
     int buffer_idx = buffer_pair.selectNextBuffer();
-    int buffer_used_by_task_idx = buffer_pair.users[buffer_idx];
+    BufferPair::Buffer &buffer = buffer_pair.buffers[buffer_idx];
+    int buffer_used_by_task_idx = buffer.user;
 
     // if buffer is in use by a previous task, wait for it to complete
     if (buffer_used_by_task_idx >= 0) {
@@ -331,14 +332,14 @@ int RdmaCopyBackend::acquireBuffer(BufferPair &buffer_pair,
     }
 
     // mark buffer as owned by current task and update task metadata
-    buffer_pair.users[buffer_idx] = task_idx;
+    buffer.user = task_idx;
     tasks[task_idx].buffer_pair = &buffer_pair;
     tasks[task_idx].buffer_idx = buffer_idx;
     return 0;
 }
 
 void RdmaCopyBackend::releaseBuffer(Task &task) {
-    task.buffer_pair->users[task.buffer_idx] = -1;
+    task.buffer_pair->buffers[task.buffer_idx].user = -1;
     task.buffer_pair = nullptr;
     task.buffer_idx = -1;
 }
@@ -349,20 +350,20 @@ void RdmaCopyBackend::releaseBuffer(Task &task) {
 void RdmaCopyBackend::memcpyAsync(const void *src, size_t size,
                                   BufferPair &buffer_pair, int buffer_idx) {
     assert(buffer_idx >= 0 && buffer_idx < 2);
-    void *dst = buffer_pair.buffers[buffer_idx];
+    BufferPair::Buffer &buffer = buffer_pair.buffers[buffer_idx];
+    void *dst = buffer.addr;
 
     if (buffer_pair.is_cuda) {
 #ifdef USE_CUDA
         cudaError_t err = cudaMemcpyAsync(
-            dst, src, size, cudaMemcpyDeviceToDevice, buffer_pair.cuda_stream);
+            dst, src, size, cudaMemcpyDeviceToDevice, buffer.cuda_stream);
         if (err != cudaSuccess) {
             throw std::runtime_error(std::string("cudaMemcpyAsync failed: ") +
                                      cudaGetErrorString(err));
         }
 
         // record event after async copy (for later synchronization)
-        err = cudaEventRecord(buffer_pair.copy_done_events[buffer_idx],
-                              buffer_pair.cuda_stream);
+        err = cudaEventRecord(buffer.copy_done_event, buffer.cuda_stream);
         if (err != cudaSuccess) {
             throw std::runtime_error(std::string("cudaEventRecord failed: ") +
                                      cudaGetErrorString(err));
@@ -401,11 +402,13 @@ int RdmaCopyBackend::startTaskCopy(std::vector<Task> &tasks, size_t task_idx,
 }
 
 int RdmaCopyBackend::submitTaskRdma(Task &task, int target_segment_id) {
+    assert(task.buffer_pair && task.buffer_idx >= 0);
+    BufferPair::Buffer &buffer = task.buffer_pair->buffers[task.buffer_idx];
+
 #ifdef USE_CUDA
     // wait for CUDA copy to complete before RDMA reads the buffer
-    if (task.buffer_pair && task.buffer_pair->is_cuda) {
-        cudaEvent_t event = task.buffer_pair->copy_done_events[task.buffer_idx];
-        cudaError_t err = cudaEventSynchronize(event);
+    if (task.buffer_pair->is_cuda) {
+        cudaError_t err = cudaEventSynchronize(buffer.copy_done_event);
         if (err != cudaSuccess) {
             LOG(ERROR) << "Failed to sync CUDA event: "
                        << cudaGetErrorString(err);
@@ -416,11 +419,10 @@ int RdmaCopyBackend::submitTaskRdma(Task &task, int target_segment_id) {
 #endif
 
     // submit RDMA write from buffer to remote target
-    assert(task.buffer_pair && task.buffer_idx >= 0);
     transfer_request_t req = {
         .opcode = OPCODE_WRITE,
         .operand = 0,
-        .source = task.buffer_pair->buffers[task.buffer_idx],
+        .source = buffer.addr,
         .target_id = target_segment_id,
         .target_offset = task.target_addr,
         .length = task.length,
@@ -474,17 +476,21 @@ int RdmaCopyBackend::waitBatch(batch_id_t &batch_id) {
 
 RdmaCopyBackend::BufferPair::BufferPair(char *buffer_base, size_t size,
                                         bool is_cuda)
-    : buffers{buffer_base, buffer_base + size},
-      size(size),
-      is_cuda(is_cuda),
-      users{-1, -1}
+    : size(size), is_cuda(is_cuda) {
+    // Initialize buffer addresses and users
+    buffers[0].addr = buffer_base;
+    buffers[1].addr = buffer_base + size;
+    buffers[0].user = -1;
+    buffers[1].user = -1;
+
 #ifdef USE_CUDA
-      ,
-      cuda_stream(nullptr)
-#endif
-{
-#ifdef USE_CUDA
-    if (is_cuda) {
+    buffers[0].cuda_stream = nullptr;
+    buffers[1].cuda_stream = nullptr;
+    buffers[0].copy_done_event = nullptr;
+    buffers[1].copy_done_event = nullptr;
+
+    if (is_cuda) {  // Assume: cuda device has been set before initialization
+
         // Get the priority range and set stream to highest priority
         int leastPriority, greatestPriority;
         cudaError_t err =
@@ -495,18 +501,18 @@ RdmaCopyBackend::BufferPair::BufferPair(char *buffer_base, size_t size,
                 cudaGetErrorString(err));
         }
 
-        // Create stream with highest priority (lowest numerical value)
-        err = cudaStreamCreateWithPriority(&cuda_stream, cudaStreamNonBlocking,
-                                           greatestPriority);
-        if (err != cudaSuccess) {
-            throw std::runtime_error(
-                std::string("Failed to create CUDA stream: ") +
-                cudaGetErrorString(err));
-        }
-
-        // create events for both buffers
+        // Create streams and events for both buffers with highest priority
         for (int i = 0; i < 2; ++i) {
-            err = cudaEventCreate(&copy_done_events[i]);
+            err = cudaStreamCreateWithPriority(&buffers[i].cuda_stream,
+                                               cudaStreamNonBlocking,
+                                               greatestPriority);
+            if (err != cudaSuccess) {
+                throw std::runtime_error(
+                    std::string("Failed to create CUDA stream: ") +
+                    cudaGetErrorString(err));
+            }
+
+            err = cudaEventCreate(&buffers[i].copy_done_event);
             if (err != cudaSuccess) {
                 throw std::runtime_error(
                     std::string("Failed to create CUDA event: ") +
@@ -519,11 +525,12 @@ RdmaCopyBackend::BufferPair::BufferPair(char *buffer_base, size_t size,
 
 RdmaCopyBackend::BufferPair::~BufferPair() {
 #ifdef USE_CUDA
-    if (is_cuda && cuda_stream) {
-        cudaStreamDestroy(cuda_stream);
-
+    if (is_cuda) {
         for (int i = 0; i < 2; ++i) {
-            if (copy_done_events[i]) cudaEventDestroy(copy_done_events[i]);
+            if (buffers[i].cuda_stream)
+                cudaStreamDestroy(buffers[i].cuda_stream);
+            if (buffers[i].copy_done_event)
+                cudaEventDestroy(buffers[i].copy_done_event);
         }
     }
 #endif

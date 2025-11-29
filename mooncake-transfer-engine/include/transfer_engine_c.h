@@ -33,7 +33,8 @@ extern "C" {
 #define OPCODE_ATOMIC_FETCH_ADD (2)
 
 struct transfer_request {
-    int opcode;
+    int8_t opcode;
+    int32_t operand;  // only used for ATOMIC_FETCH_ADD
     void *source;
     segment_id_t target_id;
     uint64_t target_offset;

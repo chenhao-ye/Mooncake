@@ -282,6 +282,7 @@ int RdmaEndPoint::submitPostSend(
         auto slice = slice_list[i];
         auto &sge = sge_list[i];
         sge.addr = (uint64_t)slice->source_addr;
+        sge.length = slice->length;
         sge.lkey = slice->rdma.source_lkey;
 
         auto &wr = wr_list[i];
@@ -291,11 +292,9 @@ int RdmaEndPoint::submitPostSend(
             wr.opcode = IBV_WR_ATOMIC_FETCH_AND_ADD;
             wr.wr.atomic.remote_addr = slice->rdma.dest_addr;
             wr.wr.atomic.rkey = slice->rdma.dest_rkey;
-            // the length field is overloaded as atomic operand, because the
-            // length must be 8
-            wr.wr.atomic.compare_add = slice->length;
+            wr.wr.atomic.compare_add = slice->operand;
+            assert(slice->length == 8);
         } else {
-            sge.length = slice->length;
             wr.opcode = slice->opcode == Transport::TransferRequest::READ
                             ? IBV_WR_RDMA_READ
                             : IBV_WR_RDMA_WRITE;

@@ -224,6 +224,7 @@ Status RdmaTransport::submitTransfer(
             slice->source_addr = (char *)request.source + offset;
             slice->length = std::min(request.length - offset, kBlockSize);
             slice->opcode = request.opcode;
+            slice->operand = request.operand;
             slice->rdma.dest_addr = request.target_offset + offset;
             slice->rdma.retry_cnt = 0;
             slice->rdma.max_retry_cnt = kMaxRetryCount;
@@ -287,6 +288,7 @@ Status RdmaTransport::submitTransferTask(
             slice->source_addr = (char *)request.source + offset;
             slice->length = std::min(request.length - offset, kBlockSize);
             slice->opcode = request.opcode;
+            slice->operand = request.operand;
             slice->rdma.dest_addr = request.target_offset + offset;
             slice->rdma.retry_cnt = request.advise_retry_cnt;
             slice->rdma.max_retry_cnt = kMaxRetryCount;

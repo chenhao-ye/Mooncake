@@ -51,13 +51,14 @@ class Transport {
     using HandShakeDesc = TransferMetadata::HandShakeDesc;
 
     struct TransferRequest {
-        enum OpCode { READ, WRITE, ATOMIC_FETCH_ADD };
+        enum OpCode: uint8_t { READ, WRITE, ATOMIC_FETCH_ADD };
 
         OpCode opcode;
+        int32_t operand;  // only used for ATOMIC_FETCH_ADD
         void *source;
         SegmentID target_id;
         uint64_t target_offset;
-        size_t length;  // for ATOMIC_FETCH_ADD, will be overloaded as operand
+        size_t length;  // must be 8-byte for ATOMIC_FETCH_ADD
         int advise_retry_cnt = 0;
     };
 
@@ -86,6 +87,7 @@ class Transport {
         void *source_addr;
         size_t length;
         TransferRequest::OpCode opcode;
+        int32_t operand;  // only used for ATOMIC_FETCH_ADD
         SegmentID target_id;
         std::string peer_nic_path;
         SliceStatus status;

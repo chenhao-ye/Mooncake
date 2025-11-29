@@ -49,6 +49,7 @@ void FlexBatch::addReadRequest(uintptr_t local_addr, uintptr_t remote_addr,
                                uint64_t size) {
     entries_.emplace_back(
         transfer_request_t{.opcode = OPCODE_READ,
+                           .operand = 0,
                            .source = reinterpret_cast<void *>(local_addr),
                            .target_id = -1,  // will be set upon submit()
                            .target_offset = remote_addr,
@@ -59,6 +60,7 @@ void FlexBatch::addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
                                 uint64_t size) {
     entries_.emplace_back(
         transfer_request_t{.opcode = OPCODE_WRITE,
+                           .operand = 0,
                            .source = reinterpret_cast<void *>(local_addr),
                            .target_id = -1,  // will be set upon submit()
                            .target_offset = remote_addr,
@@ -66,14 +68,14 @@ void FlexBatch::addWriteRequest(uintptr_t local_addr, uintptr_t remote_addr,
 }
 
 void FlexBatch::addFetchAddRequest(uintptr_t local_addr, uintptr_t remote_addr,
-                                   uint64_t value) {
+                                   int32_t value) {
     entries_.emplace_back(
         transfer_request_t{.opcode = OPCODE_ATOMIC_FETCH_ADD,
+                           .operand = value,
                            .source = reinterpret_cast<void *>(local_addr),
                            .target_id = -1,  // will be set upon submit()
                            .target_offset = remote_addr,
-                           // for fetch-add, .length is overloaded for operand
-                           .length = value});
+                           .length = 8});
 }
 
 int FlexBatch::submit(const std::string &target, bool is_direct,

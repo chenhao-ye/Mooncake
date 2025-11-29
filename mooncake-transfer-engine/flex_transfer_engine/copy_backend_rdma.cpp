@@ -298,11 +298,11 @@ int RdmaCopyBackend::tryUpdateRemoteProgress(batch_id_t &progress_batch_id,
     // submit another batch for progress update
     transfer_request_t progress_req = {
         .opcode = OPCODE_ATOMIC_FETCH_ADD,
+        .operand = static_cast<int32_t>(num_done - last_updated_num_done),
         .source = (void *)&(ctrl_block->progress_counter),
         .target_id = target_segment_id,
         .target_offset = target_progress_addr,
-        // for atomic fetch-add, .length is overloaded as the operand value
-        .length = static_cast<uint64_t>(num_done - last_updated_num_done),
+        .length = 8,
     };
 
     rc = submitBatch(progress_batch_id, progress_req);
@@ -419,6 +419,7 @@ int RdmaCopyBackend::submitTaskRdma(Task &task, int target_segment_id) {
     assert(task.buffer_pair && task.buffer_idx >= 0);
     transfer_request_t req = {
         .opcode = OPCODE_WRITE,
+        .operand = 0,
         .source = task.buffer_pair->buffers[task.buffer_idx],
         .target_id = target_segment_id,
         .target_offset = task.target_addr,

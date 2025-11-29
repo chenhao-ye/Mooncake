@@ -132,6 +132,7 @@ int submitTransfer(transfer_engine_t engine, batch_id_t batch_id,
     for (size_t index = 0; index < count; index++) {
         native_entries[index].opcode =
             (Transport::TransferRequest::OpCode)entries[index].opcode;
+        native_entries[index].operand = entries[index].operand;
         native_entries[index].source = entries[index].source;
         native_entries[index].target_id = entries[index].target_id;
         native_entries[index].target_offset = entries[index].target_offset;

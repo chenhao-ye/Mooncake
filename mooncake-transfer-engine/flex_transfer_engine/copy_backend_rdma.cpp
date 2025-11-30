@@ -184,7 +184,7 @@ int RdmaCopyBackend::processRequest(const std::string &target_segment_name,
         }
     }
 
-    LOG(INFO) << "Completed transfer request: " << num_done << " tasks";
+    // LOG(INFO) << "Completed transfer request: " << num_done << " tasks";
     return 0;
 
 cleanup:

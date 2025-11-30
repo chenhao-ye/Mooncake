@@ -20,7 +20,7 @@ class RdmaCopyBackend;
 struct RdmaCopyCtrlBlock;
 
 class RdmaCopyBackend {
-    struct BufferPair;  // forward declaration
+    struct MultiBuffer;  // forward declaration
 
    public:
     struct Task {
@@ -31,7 +31,7 @@ class RdmaCopyBackend {
 
         // execution info
         batch_id_t batch_id = INVALID_BATCH;
-        struct BufferPair *buffer_pair = nullptr;
+        struct MultiBuffer *multi_buffer = nullptr;
         int buffer_idx = -1;
 
         Task(void *source_addr, uint64_t target_addr, size_t length)
@@ -39,7 +39,7 @@ class RdmaCopyBackend {
               target_addr(target_addr),
               length(length),
               batch_id(INVALID_BATCH),
-              buffer_pair(nullptr),
+              multi_buffer(nullptr),
               buffer_idx(-1) {}
     };
 
@@ -62,10 +62,10 @@ class RdmaCopyBackend {
     RdmaCopyBackend &operator=(RdmaCopyBackend &&) = delete;
 
     // Require regions_mutex_
-    // Ensure that a buffer pair is ready for the given location with at least
+    // Ensure that a multi-buffer is ready for the given location with at least
     // the given length
-    int prepareBufferPair(LocId loc_id, const std::string &location,
-                          size_t length);
+    int prepareMultiBuffer(LocId loc_id, const std::string &location,
+                           size_t length);
 
     // Will acquire regions_mutex_
     // Process RDMA transfer requests
@@ -77,52 +77,51 @@ class RdmaCopyBackend {
     // Require regions_mutex_
     void cleanup();
 
-   public: /* Resource pools: ctrl blocks and buffer pairs */
+   public: /* Resource pools: ctrl blocks and multi buffers */
     RdmaCopyCtrlBlock *allocCtrlBlock();
     void freeCtrlBlock(RdmaCopyCtrlBlock *ctrl_block);
 
     // Require regions_mutex_ to be held before calling
-    // When this function is called, there MUST be a buffer pair ready with the
+    // When this function is called, there MUST be a multi buffer ready with the
     // proper length (which should have been set up upon registration)
-    BufferPair &getBufferPair(LocId loc_id) {
+    MultiBuffer &getMultiBuffer(LocId loc_id) {
         assert(static_cast<size_t>(loc_id.idx) < buffer_pool_.size());
         return *buffer_pool_[loc_id.idx];
     }
     // Require regions_mutex_ to be held before calling
-    BufferPair *allocBufferPair(LocId loc_id, const std::string &location,
-                                size_t size);
+    MultiBuffer *allocMultiBuffer(LocId loc_id, const std::string &location,
+                                  size_t size);
     // Require regions_mutex_ to be held before calling
-    void freeBufferPair(BufferPair *pair);
+    void freeMultiBuffer(MultiBuffer *mb);
 
    private:
     std::vector<RdmaCopyCtrlBlock *> ctrl_block_cache_;
     std::mutex ctrl_block_mutex_;
 
-    // BufferPair per location
+    // MultiBuffer per location
     // Require regions_mutex_ to be held before accessing
-    std::vector<BufferPair *> buffer_pool_;
+    std::vector<MultiBuffer *> buffer_pool_;
 
    private: /* Helper functions for task execution */
-    // Acquire a buffer from the buffer pair for the given task
+    // Acquire a buffer from the multi buffer for the given task
     // Waits for the previous task using the selected buffer if needed
-    // Sets task.buffer_pair, task.buffer_idx, and marks buffer as owned
+    // Sets task.multi_buffer, task.buffer_idx, and marks buffer as owned
     // Returns 0 on success, -1 on error
-    int acquireBuffer(BufferPair &buffer_pair, std::vector<Task> &tasks,
+    int acquireBuffer(MultiBuffer &multi_buffer, std::vector<Task> &tasks,
                       size_t task_idx);
 
-    // Release a buffer back to the buffer pair (mark as free)
+    // Release a buffer back to the multi buffer (mark as free)
     void releaseBuffer(Task &task);
 
     // Copy memory from src to buffer; handle both CPU and CUDA memory
     // For CUDA memory, uses async copy and records event for the given
-    // buffer_idx Destination is inferred from buffer_pair.buffers[buffer_idx]
-    void memcpyAsync(const void *src, size_t size, BufferPair &buffer_pair,
+    // buffer_idx Destination is inferred from multi_buffer.buffers[buffer_idx]
+    void memcpyAsync(const void *src, size_t size, MultiBuffer &multi_buffer,
                      int buffer_idx);
 
     // Phase 1: Start async CUDA copy (non-blocking)
     // Acquires buffer, validates region, starts copy, records CUDA event
-    int startTaskCopy(std::vector<Task> &tasks, size_t task_idx,
-                      int target_segment_id);
+    int startTaskCopy(std::vector<Task> &tasks, size_t task_idx);
 
     // Phase 2: Wait for copy completion and submit RDMA transfer
     // Synchronizes on CUDA event if needed, then submits RDMA batch
@@ -157,8 +156,10 @@ class RdmaCopyBackend {
     // update batch_id to INVALID_BATCH; return the status
     int waitBatch(batch_id_t &batch_id);
 
-    /* BufferPair definition */
-    struct BufferPair {
+    /* MultiBuffer definition */
+    struct MultiBuffer {
+        static int pipeline_depth;  // Configurable pipeline depth, default 4
+
         struct Buffer {
             char *addr;
             int user;
@@ -167,25 +168,32 @@ class RdmaCopyBackend {
             cudaEvent_t copy_done_event;
 #endif
         };
-        // buffers[0] is first half, buffers[1] is second half
-        // buffers[0].addr is also the base address of allocation
-        Buffer buffers[2];
-        size_t size;   // Size of each half
+        // buffers[0].addr is the base address of allocation
+        // Each buffer has size bytes
+        std::vector<Buffer> buffers;
+        size_t size;   // Size of each buffer
         bool is_cuda;  // true if CUDA memory, false if CPU memory
 
-        BufferPair(char *buffer_base, size_t size, bool is_cuda);
-        ~BufferPair();
+        MultiBuffer(char *buffer_base, size_t size, bool is_cuda,
+                    int num_buffers);
+        ~MultiBuffer();
 
-        BufferPair(const BufferPair &) = delete;
-        BufferPair(BufferPair &&) = delete;
-        BufferPair &operator=(const BufferPair &) = delete;
-        BufferPair &operator=(BufferPair &&) = delete;
+        MultiBuffer(const MultiBuffer &) = delete;
+        MultiBuffer(MultiBuffer &&) = delete;
+        MultiBuffer &operator=(const MultiBuffer &) = delete;
+        MultiBuffer &operator=(MultiBuffer &&) = delete;
 
-        // select the next buffer to use
-        // return the one with a lower-index task (likely to finish earlier OR
-        // is free for buffers[i].user<0)
+        // Select the next buffer to use
+        // Returns buffer with minimum user value (free buffers have user=-1)
         int selectNextBuffer() {
-            return buffers[0].user <= buffers[1].user ? 0 : 1;
+            int min_idx = 0;
+            if (buffers[0].user < 0) return 0;  // free buffer
+
+            for (size_t i = 1; i < buffers.size(); ++i) {
+                if (buffers[i].user < 0) return i;  // free buffer
+                if (buffers[i].user < buffers[min_idx].user) min_idx = i;
+            }
+            return min_idx;
         }
     };
 };

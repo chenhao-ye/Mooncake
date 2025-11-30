@@ -97,7 +97,7 @@ int FlexTransferEngine::registerLocalMemory(uintptr_t addr, size_t length,
         region_mgr_.addRegion(reinterpret_cast<void *>(addr), length, loc_id);
 
         if (copy_server_enabled_) {
-            rc = rdma_copy_backend_.prepareBufferPair(loc_id, location, length);
+            rc = rdma_copy_backend_.prepareMultiBuffer(loc_id, location, length);
             if (rc) {
                 region_mgr_.removeRegion(reinterpret_cast<void *>(addr));
                 return -1;
@@ -157,8 +157,8 @@ int FlexTransferEngine::registerLocalMemoryBatch(
         }
 
         if (copy_server_enabled_) {
-            rc = rdma_copy_backend_.prepareBufferPair(loc_id, location,
-                                                      max_size);
+            rc = rdma_copy_backend_.prepareMultiBuffer(loc_id, location,
+                                                       max_size);
             if (rc) {
                 for (const auto &entry : buffer_list)
                     region_mgr_.removeRegion(entry.addr);

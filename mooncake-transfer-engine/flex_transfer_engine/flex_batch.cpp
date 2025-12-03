@@ -209,8 +209,11 @@ void FlexBatch::checkTcpProgress() {
                                           std::try_to_lock);
         if (!lock.owns_lock()) return;  // Worker is still working
 
-        // else: mutex is successfully acquired, meaning the worker has
-        // finalized it read progress again to prevent race
+        if (tcp_ctrl_block_->server_fd >= 0)
+            return;  // Worker hasn't started yet
+
+        // else: mutex is successfully acquired and worker has finished
+        // (server_fd = -1) read progress again to prevent race
         known_progress_ =
             tcp_ctrl_block_->progress_counter.load(std::memory_order_acquire);
     }

@@ -36,10 +36,7 @@ void FlexBatch::free() {
         rdma_ctrl_block_ = nullptr;
     }
     if (tcp_ctrl_block_) {
-        // wait until the working thread to finalize it (otherwise it is unsafe
-        // to have the worker still modifying the copiable region).
-        // the worker will release the mutex once it is done.
-        std::lock_guard lock(tcp_ctrl_block_->mutex_);
+        // freeCtrlBlock() will acquire mutex to ensure worker is idle
         engine_->getCopyClient().freeCtrlBlock(tcp_ctrl_block_);
         tcp_ctrl_block_ = nullptr;
     }

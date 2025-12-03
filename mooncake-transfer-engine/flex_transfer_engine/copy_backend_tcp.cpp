@@ -107,6 +107,14 @@ TcpCopyCtrlBlock *TcpCopyBackend::allocCtrlBlock() {
 
 void TcpCopyBackend::freeCtrlBlock(TcpCopyCtrlBlock *ctrl_block) {
     if (!ctrl_block) return;
+
+    // Acquire control block mutex to ensure worker is idle, then reset
+    {
+        std::lock_guard<std::mutex> lock(ctrl_block->mutex_);
+        ctrl_block->progress_counter.store(0, std::memory_order_release);
+    }
+
+    // Return to cache
     std::lock_guard<std::mutex> lock(ctrl_block_mutex_);
     ctrl_block_cache_.emplace_back(ctrl_block);
 }

@@ -19,6 +19,34 @@
 #include <string>
 #include <vector>
 
+static inline std::vector<std::string> parseDeviceList(const char *env_var) {
+    std::vector<std::string> devices;
+    if (!env_var || strlen(env_var) == 0) return devices;
+
+    std::string devices_str(env_var);
+    size_t start = 0;
+    size_t end = devices_str.find(',');
+
+    while (end != std::string::npos) {
+        std::string device = devices_str.substr(start, end - start);
+        // Trim whitespace
+        device.erase(0, device.find_first_not_of(" \t"));
+        device.erase(device.find_last_not_of(" \t") + 1);
+        if (!device.empty()) devices.push_back(device);
+
+        start = end + 1;
+        end = devices_str.find(',', start);
+    }
+
+    // Last device
+    std::string device = devices_str.substr(start);
+    device.erase(0, device.find_first_not_of(" \t"));
+    device.erase(device.find_last_not_of(" \t") + 1);
+    if (!device.empty()) devices.push_back(device);
+
+    return devices;
+}
+
 static inline std::vector<std::string> findLocalIpv4Addresses() {
     std::vector<std::string> ips;
     struct ifaddrs *ifaddr, *ifa;
@@ -28,20 +56,35 @@ static inline std::vector<std::string> findLocalIpv4Addresses() {
         return ips;
     }
 
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == nullptr) {
-            continue;
-        }
+    // Parse device filter from environment variable
+    auto device_filter = parseDeviceList(getenv("FLEX_TCP_DEVICE"));
 
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-            if (strcmp(ifa->ifa_name, "lo") == 0) {
-                continue;
-            }
+    if (device_filter.empty()) {
+        // No filter specified, use all devices except loopback
+        for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+            if (ifa->ifa_addr == nullptr) continue;
+            if (ifa->ifa_addr->sa_family != AF_INET) continue;
+            if (strcmp(ifa->ifa_name, "lo") == 0) continue;
 
             char host[NI_MAXHOST];
             if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
                             NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
                 ips.push_back(host);
+            }
+        }
+    } else {
+        // Filter by specified devices in order
+        for (const auto &device_name : device_filter) {
+            for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+                if (ifa->ifa_addr == nullptr) continue;
+                if (ifa->ifa_addr->sa_family != AF_INET) continue;
+                if (strcmp(ifa->ifa_name, device_name.c_str()) != 0) continue;
+
+                char host[NI_MAXHOST];
+                if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
+                                NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+                    ips.push_back(host);
+                }
             }
         }
     }
@@ -59,20 +102,36 @@ static inline std::vector<std::string> findLocalIpv6Addresses() {
         return ips;
     }
 
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == nullptr) {
-            continue;
-        }
+    // Parse device filter from environment variable
+    auto device_filter = parseDeviceList(getenv("FLEX_TCP_DEVICE"));
 
-        if (ifa->ifa_addr->sa_family == AF_INET6) {
-            if (strcmp(ifa->ifa_name, "lo") == 0) {
-                continue;
-            }
+    if (device_filter.empty()) {
+        // No filter specified, use all devices except loopback
+        for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+            if (ifa->ifa_addr == nullptr) continue;
+            if (ifa->ifa_addr->sa_family != AF_INET6) continue;
+            if (strcmp(ifa->ifa_name, "lo") == 0) continue;
 
             char host[NI_MAXHOST];
             if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in6), host,
                             NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
                 ips.push_back(host);
+            }
+        }
+    } else {
+        // Filter by specified devices in order
+        for (const auto &device_name : device_filter) {
+            for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+                if (ifa->ifa_addr == nullptr) continue;
+                if (ifa->ifa_addr->sa_family != AF_INET6) continue;
+                if (strcmp(ifa->ifa_name, device_name.c_str()) != 0) continue;
+
+                char host[NI_MAXHOST];
+                if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in6),
+                                host, NI_MAXHOST, nullptr, 0,
+                                NI_NUMERICHOST) == 0) {
+                    ips.push_back(host);
+                }
             }
         }
     }

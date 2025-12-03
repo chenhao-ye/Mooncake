@@ -873,9 +873,7 @@ std::shared_ptr<HandShakePlugin> HandShakePlugin::Create(
 
 static inline std::vector<std::string> parseDeviceList(const char *env_var) {
     std::vector<std::string> devices;
-    if (!env_var || strlen(env_var) == 0) {
-        return devices;
-    }
+    if (!env_var || strlen(env_var) == 0) return devices;
 
     std::string devices_str(env_var);
     size_t start = 0;
@@ -886,9 +884,8 @@ static inline std::vector<std::string> parseDeviceList(const char *env_var) {
         // Trim whitespace
         device.erase(0, device.find_first_not_of(" \t"));
         device.erase(device.find_last_not_of(" \t") + 1);
-        if (!device.empty()) {
-            devices.push_back(device);
-        }
+        if (!device.empty()) devices.emplace_back(std::move(device));
+
         start = end + 1;
         end = devices_str.find(',', start);
     }
@@ -897,9 +894,7 @@ static inline std::vector<std::string> parseDeviceList(const char *env_var) {
     std::string device = devices_str.substr(start);
     device.erase(0, device.find_first_not_of(" \t"));
     device.erase(device.find_last_not_of(" \t") + 1);
-    if (!device.empty()) {
-        devices.push_back(device);
-    }
+    if (!device.empty()) devices.emplace_back(std::move(device));
 
     return devices;
 }
@@ -984,8 +979,9 @@ std::vector<std::string> findLocalIpv6Addresses() {
                 if (strcmp(ifa->ifa_name, device_name.c_str()) != 0) continue;
 
                 char host[NI_MAXHOST];
-                if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in6), host,
-                                NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+                if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in6),
+                                host, NI_MAXHOST, nullptr, 0,
+                                NI_NUMERICHOST) == 0) {
                     ips.push_back(host);
                 }
             }

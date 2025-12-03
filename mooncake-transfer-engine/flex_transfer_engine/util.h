@@ -32,7 +32,7 @@ static inline std::vector<std::string> parseDeviceList(const char *env_var) {
         // Trim whitespace
         device.erase(0, device.find_first_not_of(" \t"));
         device.erase(device.find_last_not_of(" \t") + 1);
-        if (!device.empty()) devices.push_back(device);
+        if (!device.empty()) devices.emplace_back(std::move(device));
 
         start = end + 1;
         end = devices_str.find(',', start);
@@ -42,7 +42,7 @@ static inline std::vector<std::string> parseDeviceList(const char *env_var) {
     std::string device = devices_str.substr(start);
     device.erase(0, device.find_first_not_of(" \t"));
     device.erase(device.find_last_not_of(" \t") + 1);
-    if (!device.empty()) devices.push_back(device);
+    if (!device.empty()) devices.emplace_back(std::move(device));
 
     return devices;
 }

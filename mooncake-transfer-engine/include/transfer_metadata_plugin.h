@@ -62,9 +62,11 @@ struct HandShakePlugin {
     virtual void registerOnMetadataCallBack(OnReceiveCallBack callback) = 0;
 };
 
-std::vector<std::string> findLocalIpAddresses();
+std::vector<std::string> findLocalIpv4Addresses();
 
-uint16_t findAvailableTcpPort(int &sockfd);
+std::vector<std::string> findLocalIpv6Addresses();
+
+uint16_t findAvailableTcpPort(int &sockfd, bool use_ipv6);
 
 }  // namespace mooncake
 

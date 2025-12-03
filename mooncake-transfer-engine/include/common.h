@@ -108,16 +108,70 @@ uint16_t getDefaultHandshakePort();
 static inline std::pair<std::string, uint16_t> parseHostNameWithPort(
     const std::string &server_name) {
     uint16_t port = getDefaultHandshakePort();
-    auto pos = server_name.find(':');
-    if (pos == server_name.npos) return std::make_pair(server_name, port);
+
+    // Check for IPv6 format with brackets: [addr]:port
+    if (!server_name.empty() && server_name[0] == '[') {
+        size_t bracket_end = server_name.find(']');
+        if (bracket_end == std::string::npos) {
+            LOG(WARNING) << "Invalid IPv6 bracket notation: " << server_name;
+            return std::make_pair(server_name, port);
+        }
+
+        std::string hostname = server_name.substr(1, bracket_end - 1);
+
+        // Check for port after bracket
+        if (bracket_end + 1 < server_name.length() &&
+            server_name[bracket_end + 1] == ':') {
+            std::string port_str = server_name.substr(bracket_end + 2);
+            int val = std::atoi(port_str.c_str());
+            if (val > 0 && val <= 65535) {
+                port = (uint16_t)val;
+            } else {
+                LOG(WARNING) << "Illegal port number in " << server_name
+                           << ". Use default port " << port << " instead";
+            }
+        }
+        return std::make_pair(hostname, port);
+    }
+
+    // IPv4 format or IPv6 without brackets (use rfind for last colon)
+    auto pos = server_name.rfind(':');
+    if (pos == server_name.npos) {
+        return std::make_pair(server_name, port);
+    }
+
     auto trimmed_server_name = server_name.substr(0, pos);
     auto port_str = server_name.substr(pos + 1);
+
+    // Check if the part before the last colon contains another colon
+    // If yes, this is likely a bare IPv6 address (e.g., fe80::1)
+    if (trimmed_server_name.find(':') != std::string::npos) {
+        // This looks like an IPv6 address, treat entire string as hostname
+        return std::make_pair(server_name, port);
+    }
+
+    // Check if port_str is a valid port (all digits)
+    // If not, this is likely malformed
+    bool is_valid_port = !port_str.empty();
+    for (char c : port_str) {
+        if (!std::isdigit(c)) {
+            is_valid_port = false;
+            break;
+        }
+    }
+
+    if (!is_valid_port) {
+        // Not a valid port format
+        return std::make_pair(server_name, port);
+    }
+
     int val = std::atoi(port_str.c_str());
-    if (val <= 0 || val > 65535)
-        LOG(WARNING) << "Illegal port number in " << server_name
-                     << ". Use default port " << port << " instead";
-    else
+    if (val > 0 && val <= 65535) {
         port = (uint16_t)val;
+    } else {
+        LOG(WARNING) << "Illegal port number in " << server_name
+                   << ". Use default port " << port << " instead";
+    }
     return std::make_pair(trimmed_server_name, port);
 }
 

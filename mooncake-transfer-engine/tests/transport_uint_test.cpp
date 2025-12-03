@@ -65,6 +65,7 @@ int CreateTempFileWithContent(const char* content) {
 }
 
 TEST_F(TransportTest, parseHostNameWithPortTest) {
+    // Existing IPv4 tests
     std::string local_server_name = "0.0.0.0:1234";
     auto res = parseHostNameWithPort(local_server_name);
     ASSERT_EQ(res.first, "0.0.0.0");
@@ -74,6 +75,29 @@ TEST_F(TransportTest, parseHostNameWithPortTest) {
     res = parseHostNameWithPort(local_server_name);
     ASSERT_EQ(res.first, "1.2.3.4");
     ASSERT_EQ(res.second, 12001);
+
+    // NEW: IPv6 tests with bracket notation
+    local_server_name = "[::1]:1234";
+    res = parseHostNameWithPort(local_server_name);
+    ASSERT_EQ(res.first, "::1");
+    ASSERT_EQ(res.second, 1234);
+
+    local_server_name = "[2001:db8::1]:8080";
+    res = parseHostNameWithPort(local_server_name);
+    ASSERT_EQ(res.first, "2001:db8::1");
+    ASSERT_EQ(res.second, 8080);
+
+    // NEW: IPv6 without port (should use default)
+    local_server_name = "[fe80::1]";
+    res = parseHostNameWithPort(local_server_name);
+    ASSERT_EQ(res.first, "fe80::1");
+    ASSERT_EQ(res.second, 12001);  // Default port
+
+    // NEW: IPv6 without brackets (bare address using rfind)
+    local_server_name = "fe80::1";
+    res = parseHostNameWithPort(local_server_name);
+    ASSERT_EQ(res.first, "fe80::1");
+    ASSERT_EQ(res.second, 12001);  // Default port (no port specified)
 }
 
 TEST_F(TransportTest, WriteSuccess) {

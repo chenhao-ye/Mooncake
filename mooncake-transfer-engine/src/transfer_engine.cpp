@@ -49,6 +49,7 @@ int TransferEngine::init(const std::string &metadata_conn_string,
     local_server_name_ = local_server_name;
     TransferMetadata::RpcMetaDesc desc;
     std::string rpc_binding_method;
+    bool use_ipv6 = false;
 
     if (getenv("MC_LEGACY_RPC_PORT_BINDING") ||
         metadata_conn_string == P2PHANDSHAKE) {
@@ -61,7 +62,11 @@ int TransferEngine::init(const std::string &metadata_conn_string,
         if (metadata_conn_string == P2PHANDSHAKE) {
             rpc_binding_method = "P2P handshake";
             if (port == getDefaultHandshakePort()) {
-                desc.rpc_port = findAvailableTcpPort(desc.sockfd);
+                // Detect IPv6 preference for port binding
+                auto ipv6_list = findLocalIpv6Addresses();
+                use_ipv6 = !ipv6_list.empty() && !ipv6_list[0].empty();
+
+                desc.rpc_port = findAvailableTcpPort(desc.sockfd, use_ipv6);
                 if (desc.rpc_port == 0) {
                     LOG(ERROR)
                         << "P2P: No valid port found for local TCP service.";
@@ -75,22 +80,33 @@ int TransferEngine::init(const std::string &metadata_conn_string,
         rpc_binding_method = "new RPC mapping";
         (void)(ip_or_host_name);
         auto *ip_address = getenv("MC_TCP_BIND_ADDRESS");
-        if (ip_address)
+        if (ip_address) {
             desc.ip_or_host_name = ip_address;
-        else {
-            auto ip_list = findLocalIpAddresses();
-            if (ip_list.empty()) {
-                LOG(ERROR) << "not valid LAN address found";
-                return -1;
+            // Detect if provided address is IPv6
+            if (std::string(ip_address).find(':') != std::string::npos) {
+                use_ipv6 = true;
+            }
+        } else {
+            // Try IPv6 first
+            auto ipv6_list = findLocalIpv6Addresses();
+            if (!ipv6_list.empty() && !ipv6_list[0].empty()) {
+                use_ipv6 = true;
+                desc.ip_or_host_name = ipv6_list[0];
             } else {
-                desc.ip_or_host_name = ip_list[0];
+                // Fall back to IPv4
+                auto ipv4_list = findLocalIpv4Addresses();
+                if (ipv4_list.empty()) {
+                    LOG(ERROR) << "not valid LAN address found";
+                    return -1;
+                }
+                desc.ip_or_host_name = ipv4_list[0];
             }
         }
 
         // In the new rpc port mapping, it is randomly selected to prevent
         // port conflict
         (void)(rpc_port);
-        desc.rpc_port = findAvailableTcpPort(desc.sockfd);
+        desc.rpc_port = findAvailableTcpPort(desc.sockfd, use_ipv6);
         if (desc.rpc_port == 0) {
             LOG(ERROR) << "not valid port for serving local TCP service";
             return -1;

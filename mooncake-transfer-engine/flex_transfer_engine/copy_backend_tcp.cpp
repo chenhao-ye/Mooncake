@@ -444,7 +444,10 @@ void TcpCopyCtrlBlock::workerThreadFunc(TcpCopyCtrlBlock *ctrl_block) {
     // previously tasks and is not working now
     std::unique_lock<std::mutex> lock(ctrl_block->mutex_);
     while (ctrl_block->worker_running_) {
-        ctrl_block->cv_.wait(lock);
+        // against race: server_fd is set before wait
+        ctrl_block->cv_.wait(lock, [ctrl_block]() {
+            return !ctrl_block->worker_running_ || ctrl_block->server_fd >= 0;
+        });
         if (ctrl_block->server_fd < 0) continue;
 
         int rc = ctrl_block->backend_.processResponse(
